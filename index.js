@@ -1,4 +1,4 @@
-// index.js — LINE 場次報名 Bot（支援 +N/-N、候補補位）
+// index.js — LINE 場次報名 Bot（支援 +N/-N、候補補位、白名單管理員）
 // 環境變數：CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, PORT, ADMINS(逗號分隔)
 // 依賴：@line/bot-sdk, express
 
@@ -12,23 +12,24 @@ const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
 };
-const ADMINS = (process.env.ADMINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const MAX_ADD_PER_ONCE = 10; // +N/-N 的單次上限，可自行調整
 
-// 管理員 ID 白名單
-const adminUserIds = [
-  'maomixo', // 你的 LINE userId
-  'Uyyyyyyyyyyyyyyyyyyyyyy'  // 其他要加入的 ID
+// 方式 A：環境變數 ADMINS（逗號分隔）
+// 方式 B：程式內建白名單（保險，若沒設 ADMINS 也能用）
+const WHITELIST = [
+  // 'Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', // ← 把你的 userId 填這裡（可多個）
 ];
 
-// 判斷是否為管理員
-function isAdmin(userId, groupId, members) {
-  if (adminUserIds.includes(userId)) return true; // 白名單直接通過
-  const member = members.find(m => m.userId === userId);
-  return member && member.isAdmin; // 或原本的判斷邏輯
-}
+const ADMINS_FROM_ENV = (process.env.ADMINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
-// ====== 簡易 DB（檔案儲存）======
+const ADMIN_SET = new Set([...WHITELIST, ...ADMINS_FROM_ENV]);
+
+// 只看白名單，不看群組「管理員」身分
+const isAdmin = (userId) => ADMIN_SET.has(userId);
+
+// ====== 檔案型 DB（free 方案足夠）======
 const DB_FILE = path.join(__dirname, 'data.json');
 function loadDB() {
   try {
@@ -60,8 +61,8 @@ app.post('/webhook', line.middleware(config), (req, res) => {
     });
 });
 
-// ====== 小工具 ======
-const isAdmin = (userId) => ADMINS.includes(userId);
+// ====== 工具 ======
+const MAX_ADD_PER_ONCE = 10; // +N/-N 單次上限
 
 function parsePlusMinus(text) {
   const m = text.trim().match(/^([+-])\s*(\d+)?$/);
@@ -70,7 +71,6 @@ function parsePlusMinus(text) {
   const n = Math.max(1, Math.min(parseInt(m[2] || '1', 10), MAX_ADD_PER_ONCE));
   return { sign, n };
 }
-
 function total(list) {
   return list.reduce((a, x) => a + (x.count || 1), 0);
 }
@@ -80,40 +80,32 @@ function ensureCounts(list) {
 function indexByUserId(list, userId) {
   return list.findIndex(x => x.userId === userId);
 }
-
 function renderRow(i, m) {
   const tag = (m.count && m.count > 1) ? ` (+${m.count - 1})` : '';
   return `${i}. ${m.name}${tag}`;
 }
-
 function findCurrentEvent() {
   if (!db.current_event_id) return null;
   return db.events.find(e => e.event_id === db.current_event_id) || null;
 }
-
 function promoteFromWaitlist(cur) {
   ensureCounts(cur.attendees);
   ensureCounts(cur.waitlist);
-
   let free = cur.max - total(cur.attendees);
   if (free <= 0) return;
-
   let i = 0;
   while (free > 0 && i < cur.waitlist.length) {
     const w = cur.waitlist[i];
     const take = Math.min(w.count, free);
-
     const aidx = indexByUserId(cur.attendees, w.userId);
     if (aidx !== -1) cur.attendees[aidx].count += take;
     else cur.attendees.push({ userId: w.userId, name: w.name, count: take });
-
     w.count -= take;
     free -= take;
     if (w.count <= 0) cur.waitlist.splice(i, 1);
     else i++;
   }
 }
-
 function quickReplyDefault() {
   return {
     items: [
@@ -123,7 +115,6 @@ function quickReplyDefault() {
     ]
   };
 }
-
 function buildListText(cur) {
   ensureCounts(cur.attendees);
   const rows = [];
@@ -138,47 +129,41 @@ function buildListText(cur) {
              `====================\n` +
              `✅ 正式名單 (${total(cur.attendees)}/${cur.max}人)：\n` +
              rows.join('\n');
-
   if (cur.waitlist.length > 0) {
-    const waitNames = cur.waitlist.map(m => `${m.name}${m.count > 1 ? `(+${m.count - 1})` : ''}`).join('、');
+    const waitNames = cur.waitlist
+      .map(m => `${m.name}${m.count > 1 ? `(+${m.count - 1})` : ''}`)
+      .join('、');
     text += `\n\n⏳ 候補：${waitNames}`;
   }
   return text;
 }
-
 function replyList(replyToken, cur) {
-  const text = buildListText(cur);
   return client.replyMessage(replyToken, {
     type: 'text',
-    text,
+    text: buildListText(cur),
     quickReply: quickReplyDefault(),
   });
 }
-
 async function getDisplayName(event) {
   const userId = event.source.userId;
   if (event.source.type === 'group') {
     return client.getGroupMemberProfile(event.source.groupId, userId)
-      .then(p => p.displayName)
-      .catch(() => '（匿名）');
+      .then(p => p.displayName).catch(() => '（匿名）');
   }
   if (event.source.type === 'room') {
     return client.getRoomMemberProfile(event.source.roomId, userId)
-      .then(p => p.displayName)
-      .catch(() => '（匿名）');
+      .then(p => p.displayName).catch(() => '（匿名）');
   }
   return client.getProfile(userId)
-    .then(p => p.displayName)
-    .catch(() => '（匿名）');
+    .then(p => p.displayName).catch(() => '（匿名）');
 }
 
-// ====== 指令處理 ======
+// ====== 報名處理 ======
 async function handlePlusN(event, n) {
   const cur = findCurrentEvent();
   if (!cur) {
     return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次，請管理員 /new 建立' });
   }
-
   ensureCounts(cur.attendees);
   ensureCounts(cur.waitlist);
 
@@ -205,7 +190,6 @@ async function handlePlusN(event, n) {
       else cur.waitlist.push({ userId, name, count: n });
     }
   }
-
   saveDB();
   return replyList(event.replyToken, cur);
 }
@@ -215,7 +199,6 @@ async function handleMinusN(event, n) {
   if (!cur) {
     return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次，請管理員 /new 建立' });
   }
-
   ensureCounts(cur.attendees);
   ensureCounts(cur.waitlist);
 
@@ -234,19 +217,16 @@ async function handleMinusN(event, n) {
       return client.replyMessage(event.replyToken, { type: 'text', text: '你目前不在名單中～' });
     }
   }
-
-  // 從候補補位
   promoteFromWaitlist(cur);
-
   saveDB();
   return replyList(event.replyToken, cur);
 }
 
+// ====== 指令 ======
 function parseNewArgs(text) {
   // /new 2025-08-16 | 18:00-20:00 | 大安運動中心／羽10 [max=8] [title=週六羽球]
   const body = text.replace(/^\/new\s*/i, '');
   const parts = body.split('|').map(s => s.trim());
-
   if (parts.length < 3) return null;
   let [date, timeRange, location, ...rest] = parts;
   let max = 8;
@@ -257,7 +237,6 @@ function parseNewArgs(text) {
     if (m1) max = Math.max(1, parseInt(m1[1], 10));
     if (m2) title = m2[1].trim();
   });
-
   return { date, timeRange, location, max, title };
 }
 
@@ -269,10 +248,7 @@ async function handleEvent(event) {
 
   // +N / -N
   const pm = parsePlusMinus(lower);
-  if (pm) {
-    if (pm.sign === '+') return handlePlusN(event, pm.n);
-    else return handleMinusN(event, pm.n);
-  }
+  if (pm) return pm.sign === '+' ? handlePlusN(event, pm.n) : handleMinusN(event, pm.n);
 
   // list / 名單
   if (lower === 'list' || text === '名單') {
@@ -289,7 +265,7 @@ async function handleEvent(event) {
     return client.replyMessage(event.replyToken, { type: 'text', text: s });
   }
 
-  // /new  只有管理員能用
+  // /new（白名單管理員）
   if (lower.startsWith('/new')) {
     const userId = event.source.userId;
     if (!isAdmin(userId)) {
@@ -319,17 +295,15 @@ async function handleEvent(event) {
     db.current_event_id = event_id;
     saveDB();
 
-    const head = `本週羽球報名開放～`;
     await client.replyMessage(event.replyToken, {
       type: 'text',
-      text: head,
+      text: '本週羽球報名開放～',
       quickReply: quickReplyDefault(),
     });
-    // 再貼名單
-    return pushList(event, cur);
+    return replyList(event.replyToken, cur);
   }
 
-  // /open /close（管理員）
+  // /open / /close（白名單管理員）
   if (lower === '/open' || lower === '/close') {
     const userId = event.source.userId;
     if (!isAdmin(userId)) return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以操作～' });
@@ -340,7 +314,7 @@ async function handleEvent(event) {
     return replyList(event.replyToken, cur);
   }
 
-  // /reset（管理員）
+  // /reset（白名單管理員）
   if (lower === '/reset') {
     const userId = event.source.userId;
     if (!isAdmin(userId)) return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以操作～' });
@@ -352,7 +326,7 @@ async function handleEvent(event) {
     return replyList(event.replyToken, cur);
   }
 
-  // /send（管理員）— 重新貼一次統整
+  // /send（白名單管理員）
   if (lower === '/send') {
     const userId = event.source.userId;
     if (!isAdmin(userId)) return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以操作～' });
@@ -376,23 +350,9 @@ async function handleEvent(event) {
     return client.replyMessage(event.replyToken, { type: 'text', text: helpText, quickReply: quickReplyDefault() });
   }
 
-  // 其餘不處理
   return;
-}
-
-async function pushList(event, cur) {
-  const text = buildListText(cur);
-  const reply = {
-    type: 'text',
-    text,
-    quickReply: quickReplyDefault(),
-  };
-  // 若是在群組：用 reply 即可
-  return client.replyMessage(event.replyToken, reply);
 }
 
 // ====== 啟動伺服器 ======
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server on ${PORT}`));
