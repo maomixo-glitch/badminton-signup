@@ -15,6 +15,19 @@ const config = {
 const ADMINS = (process.env.ADMINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const MAX_ADD_PER_ONCE = 10; // +N/-N 的單次上限，可自行調整
 
+// 管理員 ID 白名單
+const adminUserIds = [
+  'maomixo', // 你的 LINE userId
+  'Uyyyyyyyyyyyyyyyyyyyyyy'  // 其他要加入的 ID
+];
+
+// 判斷是否為管理員
+function isAdmin(userId, groupId, members) {
+  if (adminUserIds.includes(userId)) return true; // 白名單直接通過
+  const member = members.find(m => m.userId === userId);
+  return member && member.isAdmin; // 或原本的判斷邏輯
+}
+
 // ====== 簡易 DB（檔案儲存）======
 const DB_FILE = path.join(__dirname, 'data.json');
 function loadDB() {
