@@ -185,6 +185,8 @@ async function handleEvent(event) {
   return client.replyMessage(event.replyToken, { type: 'text', text: '指令：+1 報名、-1 取消、list 查看名單；管理員：/new、/reset、/close、/send、/whoami' });
 }
 
-// 啟動伺服器
-const PORT = process.env.PORT || 3000; // Render 會注入 PORT
-app.listen(PORT, () => console.log('BOT started on port', PORT));
+// 啟動 server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server on ${PORT}`);
+});
