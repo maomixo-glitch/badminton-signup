@@ -68,7 +68,7 @@ function parsePlusMinus(text) {
   const m = text.trim().match(/^([+-])\s*(\d+)?$/);
   if (!m) return null;
   const sign = m[1];
-  const n = Math.max(1, Math.min(parseInt(m[2] || '1', 10), MAX_ADD_PER_ONCE));
+  const n = Math.min(parseInt(m[2]) || 1, MAX_ADD_PER_ONCE);
   return { sign, n };
 }
 function total(list) {
