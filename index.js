@@ -13,6 +13,13 @@ const path = require('path');
 const express = require('express');
 const line = require('@line/bot-sdk');
 
+const app = express();
+
+const config = {
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.CHANNEL_SECRET,
+};
+
 // ====== 設定 ======
 const CONFIG = {
   DEFAULT_MAX: 10,
@@ -33,8 +40,12 @@ const app = express();
 app.use(express.json());
 
 // ====== 簡單健康檢查 ======
-app.get('/healthz', (req, res) => res.status(200).send('OK'));
-app.get('/', (req, res) => res.status(200).send('OK'));
+app.use(express.json());
+
+app.get('/healthz', (req, res) => res.send('OK'));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Server on', PORT));
 
 // ====== DB 存取 ======
 async function loadDB() {
@@ -249,10 +260,14 @@ async function applyDeltaToEvent(db, eventId, userId, name, delta) {
 }
 
 // ====== Webhook ======
-app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
-  const events = req.body.events || [];
-  const results = await Promise.all(events.map(handleEvent));
-  res.json(results);
+app.post('/webhook', line.middleware(config), async (req, res) => {
+  try {
+    await Promise.all(req.body.events.map(handleEvent));
+    res.status(200).end();
+  } catch (e) {
+    console.error(e);
+    res.status(500).end();
+  }
 });
 
 async function handleEvent(event) {
