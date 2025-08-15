@@ -1,7 +1,7 @@
 {
   "name": "line-badminton-bot",
   "version": "1.0.0",
-  "description": "LINE group badminton signup bot (+1/-1, waitlist) on Render",
+  "description": "LINE group badminton signup bot (+/-) on Render",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@line/bot-sdk": "^7.5.2",
+    "@line/bot-sdk": "^9.3.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2"
   }
