@@ -1,13 +1,16 @@
 {
-  "name": "line-badminton-bot",
+  "name": "badminton-signup",
   "version": "1.0.0",
-  "type": "module",
+  "description": "LINE group badminton signup bot on Render",
   "main": "index.js",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "@line/bot-sdk": "^7.5.2",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2"
-  },
-  "scripts": { "start": "node index.js" }
+  }
 }
