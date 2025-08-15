@@ -132,10 +132,10 @@ function totalCount(list) {
 function findAttendee(list, userId) {
   return list.findIndex(m => m.userId === userId);
 }
-function activeEvents() {
-  return Object.values(db.events)
-    .filter(e => e.status === 'open')
-    .sort((a, b) => a.id.localeCompare(b.id));
+function activeEvents(db) {
+  // db 可能是 null/undefined
+  const evtsObj = (db && db.events) ? db.events : {};
+  return Object.values(evtsObj).filter(e => e.status !== 'closed');
 }
 
 function renderIntroCard(e) {
