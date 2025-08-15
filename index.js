@@ -1,358 +1,426 @@
-// index.js — LINE 場次報名 Bot（支援 +N/-N、候補補位、白名單管理員）
-// 環境變數：CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, PORT, ADMINS(逗號分隔)
-// 依賴：@line/bot-sdk, express
+// index.js
+// LINE Badminton Signup Bot (Render-Friendly)
+// 作者: 依你的需求客製化（多場次 / Flex 按鈕 / Quick Reply / 白名單 / +N/-N 修正）
 
-const fs = require('fs');
-const path = require('path');
 const express = require('express');
 const line = require('@line/bot-sdk');
+const fs = require('fs');
+const path = require('path');
 
-// ====== 設定 ======
+// ====== 環境變數 ======
+const {
+  CHANNEL_ACCESS_TOKEN,
+  CHANNEL_SECRET,
+  PORT = 3000,
+  ADMINS = '', // 逗號分隔的 userId 清單
+} = process.env;
+
+const admins = ADMINS.split(',').map(s => s.trim()).filter(Boolean);
+
+// ====== LINE SDK ======
 const config = {
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.CHANNEL_SECRET,
+  channelAccessToken: CHANNEL_ACCESS_TOKEN,
+  channelSecret: CHANNEL_SECRET,
 };
+const client = new line.Client(config);
 
-// 方式 A：環境變數 ADMINS（逗號分隔）
-// 方式 B：程式內建白名單（保險，若沒設 ADMINS 也能用）
-const WHITELIST = [
-  // 'Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', // ← 把你的 userId 填這裡（可多個）
-];
+// ====== Express ======
+const app = express();
+app.use(express.json());
 
-const ADMINS_FROM_ENV = (process.env.ADMINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// 健康檢查
+app.get('/healthz', (req, res) => res.status(200).send('OK'));
 
-const ADMIN_SET = new Set([...WHITELIST, ...ADMINS_FROM_ENV]);
-
-// 只看白名單，不看群組「管理員」身分
-const isAdmin = (userId) => ADMIN_SET.has(userId);
-
-// ====== 檔案型 DB（free 方案足夠）======
+// ====== DB（存本機檔案） ======
 const DB_FILE = path.join(__dirname, 'data.json');
+const initDB = { events: [] }; // { date, timeRange, location, max, title, status, attendees: [{userId,name,count}] }
+
 function loadDB() {
   try {
+    if (!fs.existsSync(DB_FILE)) {
+      fs.writeFileSync(DB_FILE, JSON.stringify(initDB, null, 2));
+      return JSON.parse(JSON.stringify(initDB));
+    }
     const raw = fs.readFileSync(DB_FILE, 'utf8');
-    const d = JSON.parse(raw);
-    if (!d.events) d.events = [];
-    if (!('current_event_id' in d)) d.current_event_id = null;
-    return d;
+    return JSON.parse(raw);
   } catch (e) {
-    return { current_event_id: null, events: [] };
+    console.error('loadDB error:', e);
+    return JSON.parse(JSON.stringify(initDB));
   }
 }
-function saveDB() {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
+function saveDB(db) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  } catch (e) {
+    console.error('saveDB error:', e);
+  }
 }
+
 let db = loadDB();
-
-// ====== LINE Client & App ======
-const client = new line.Client(config);
-const app = express();
-
-app.get('/healthz', (req, res) => res.status(200).send('OK'));
-app.post('/webhook', line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
-    .then(r => res.json(r))
-    .catch(err => {
-      console.error(err);
-      res.status(500).end();
-    });
-});
 
 // ====== 工具 ======
 const MAX_ADD_PER_ONCE = 10; // +N/-N 單次上限
+const DEFAULT_MAX = 10;
 
-function parsePlusMinus(text) {
-  const m = text.trim().match(/^([+-])\s*(\d+)?$/);
+// 解析 +N / -N（可含日期）
+function parsePlusMinusWithDate(text) {
+  // 範例：+3、-1、+1 2025-08-16、-2 2025-08-23
+  const m = text.trim().match(/^([+-])\s*(\d+)?(?:\s+(\d{4}-\d{2}-\d{2}))?$/);
   if (!m) return null;
   const sign = m[1];
-  const n = Math.min(parseInt(m[2]) || 1, MAX_ADD_PER_ONCE);
-  return { sign, n };
+  const n = Math.min(parseInt(m[2] || '1', 10), MAX_ADD_PER_ONCE);
+  const date = m[3] || null;
+  return { sign, n, date };
 }
-function total(list) {
+
+// 解析 名單 [日期]
+function parseListWithDate(text) {
+  const m = text.trim().match(/^名單(?:\s+(\d{4}-\d{2}-\d{2}))?$|^list(?:\s+(\d{4}-\d{2}-\d{2}))?$/i);
+  if (!m) return null;
+  const date = m[1] || m[2] || null;
+  return { date };
+}
+
+// 總人數（sum of count）
+function total(list = []) {
   return list.reduce((a, x) => a + (x.count || 1), 0);
 }
-function ensureCounts(list) {
-  list.forEach(m => { if (!m.count || m.count < 1) m.count = 1; });
+
+function findEventByDate(date) {
+  return db.events.find(e => e.date === date) || null;
 }
-function indexByUserId(list, userId) {
-  return list.findIndex(x => x.userId === userId);
+
+function openEventsSorted() {
+  return db.events
+    .filter(e => e.status !== 'closed')
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
-function renderRow(i, m) {
-  const tag = (m.count && m.count > 1) ? ` (+${m.count - 1})` : '';
-  return `${i}. ${m.name}${tag}`;
+
+function pickDefaultEvent() {
+  const opens = openEventsSorted();
+  return opens[0] || null;
 }
-function findCurrentEvent() {
-  if (!db.current_event_id) return null;
-  return db.events.find(e => e.event_id === db.current_event_id) || null;
+
+function isAdmin(userId) {
+  if (!admins.length) return true; // 若未設定 ADMINS，預設允許
+  return admins.includes(userId);
 }
-function promoteFromWaitlist(cur) {
-  ensureCounts(cur.attendees);
-  ensureCounts(cur.waitlist);
-  let free = cur.max - total(cur.attendees);
-  if (free <= 0) return;
-  let i = 0;
-  while (free > 0 && i < cur.waitlist.length) {
-    const w = cur.waitlist[i];
-    const take = Math.min(w.count, free);
-    const aidx = indexByUserId(cur.attendees, w.userId);
-    if (aidx !== -1) cur.attendees[aidx].count += take;
-    else cur.attendees.push({ userId: w.userId, name: w.name, count: take });
-    w.count -= take;
-    free -= take;
-    if (w.count <= 0) cur.waitlist.splice(i, 1);
-    else i++;
+
+async function getDisplayName(userId) {
+  try {
+    const prof = await client.getProfile(userId);
+    return prof.displayName || '匿名';
+  } catch (e) {
+    return '匿名';
   }
 }
-function quickReplyDefault() {
+
+// ====== Flex / Quick Reply ======
+
+function quickReplyChoose(signLabel = '+1') {
+  const items = openEventsSorted().slice(0, 4).map(e => ({
+    type: 'action',
+    action: {
+      type: 'message',
+      label: `${signLabel} ${e.date.slice(5)}`, // 08-16
+      text: `${signLabel} ${e.date}`,
+    },
+  }));
+  return { items };
+}
+
+function flexEventCard(e) {
   return {
-    items: [
-      { type: 'action', action: { type: 'message', label: '+1', text: '+1' } },
-      { type: 'action', action: { type: 'message', label: '-1', text: '-1' } },
-      { type: 'action', action: { type: 'message', label: '名單', text: 'list' } },
-    ]
+    type: 'flex',
+    altText: `${e.title || '週末羽球'} ${e.date}`,
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: [
+          { type: 'text', text: e.title || '週末羽球', weight: 'bold', size: 'lg' },
+          { type: 'text', text: e.date, size: 'sm', color: '#888888' },
+          { type: 'text', text: e.timeRange || '', size: 'sm', color: '#888888' },
+          { type: 'text', text: `地點：${e.location || ''}`, size: 'sm', wrap: true },
+          { type: 'separator', margin: 'md' },
+          { type: 'text', text: `名額：${total(e.attendees)}/${e.max}`, size: 'sm' },
+        ],
+      },
+      footer: {
+        type: 'box',
+        layout: 'horizontal',
+        spacing: 'md',
+        contents: [
+          {
+            type: 'button',
+            style: 'primary',
+            color: '#22c55e',
+            action: { type: 'message', label: '+1', text: `+1 ${e.date}` },
+          },
+          {
+            type: 'button',
+            style: 'secondary',
+            action: { type: 'message', label: '-1', text: `-1 ${e.date}` },
+          },
+          {
+            type: 'button',
+            style: 'link',
+            action: { type: 'message', label: '名單', text: `名單 ${e.date}` },
+          },
+        ],
+      },
+    },
   };
 }
-function buildListText(cur) {
-  ensureCounts(cur.attendees);
-  const rows = [];
-  for (let i = 0; i < cur.max; i++) {
-    const m = cur.attendees[i];
-    rows.push(m ? renderRow(i + 1, m) : `${i + 1}.`);
+
+async function sendEventCards(replyToken) {
+  const opens = openEventsSorted().slice(0, 2);
+  if (opens.length === 0) {
+    return client.replyMessage(replyToken, { type: 'text', text: '目前沒有開放場次。' });
   }
-  let text = `📌 ${cur.title || '本週羽球'}\n\n` +
-             `📅 ${cur.date}\n` +
-             `⏰ ${cur.timeRange}\n` +
-             `地點：${cur.location}\n` +
-             `====================\n` +
-             `✅ 正式名單 (${total(cur.attendees)}/${cur.max}人)：\n` +
-             rows.join('\n');
-  if (cur.waitlist.length > 0) {
-    const waitNames = cur.waitlist
-      .map(m => `${m.name}${m.count > 1 ? `(+${m.count - 1})` : ''}`)
-      .join('、');
-    text += `\n\n⏳ 候補：${waitNames}`;
-  }
-  return text;
+  const messages = opens.map(flexEventCard);
+  return client.replyMessage(replyToken, messages);
 }
-function replyList(replyToken, cur) {
+
+// ====== 名單輸出 ======
+function renderListText(e) {
+  const lines = [];
+  lines.push(`📌 ${e.title || '週末羽球'}`);
+  lines.push(`📅 ${e.date}`);
+  if (e.timeRange) lines.push(`⏰ ${e.timeRange}`);
+  if (e.location) lines.push(`📍 地點：${e.location}`);
+  lines.push('====================');
+
+  const cur = total(e.attendees);
+  lines.push(`✅ 正式名單 (${cur}/${e.max}人)：`);
+
+  // 排名序
+  const arr = e.attendees.slice();
+  arr.forEach((m, i) => {
+    const extra = m.count > 1 ? ` (+${m.count - 1})` : '';
+    lines.push(`${i + 1}. ${m.name}${extra}`);
+  });
+
+  // 補空位顯示
+  for (let i = arr.length + 1; i <= e.max; i++) {
+    lines.push(`${i}.`);
+  }
+
+  return lines.join('\n');
+}
+
+async function replyList(replyToken, e) {
   return client.replyMessage(replyToken, {
     type: 'text',
-    text: buildListText(cur),
-    quickReply: quickReplyDefault(),
+    text: renderListText(e),
   });
 }
-async function getDisplayName(event) {
+
+// ====== +N / -N 實作（針對特定場次） ======
+async function handlePlusNForEvent(event, n, e) {
   const userId = event.source.userId;
-  if (event.source.type === 'group') {
-    return client.getGroupMemberProfile(event.source.groupId, userId)
-      .then(p => p.displayName).catch(() => '（匿名）');
+  const name = await getDisplayName(userId);
+
+  // 找此人
+  let m = e.attendees.find(x => x.userId === userId);
+  if (!m) {
+    m = { userId, name, count: 0 };
+    e.attendees.push(m);
   }
-  if (event.source.type === 'room') {
-    return client.getRoomMemberProfile(event.source.roomId, userId)
-      .then(p => p.displayName).catch(() => '（匿名）');
+  m.name = name; // 更新名稱
+  m.count = Math.min(m.count + n, MAX_ADD_PER_ONCE);
+
+  if (total(e.attendees) > e.max) {
+    // 超過上限就回覆提示（這邊不自動佔位，看你需求）
+    m.count = Math.max(m.count - n, 0);
+    saveDB(db);
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: `這一場名額已滿 (${total(e.attendees)}/${e.max})，無法再增加。`,
+    });
   }
-  return client.getProfile(userId)
-    .then(p => p.displayName).catch(() => '（匿名）');
-}
 
-// ====== 報名處理 ======
-async function handlePlusN(event, n) {
-  const cur = findCurrentEvent();
-  if (!cur) {
-    return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次，請管理員 /new 建立' });
-  }
-  ensureCounts(cur.attendees);
-  ensureCounts(cur.waitlist);
+  // 移除 count <= 0 的
+  e.attendees = e.attendees.filter(x => x.count > 0);
 
-  const userId = event.source.userId;
-  const name = await getDisplayName(event);
-
-  let idx = indexByUserId(cur.attendees, userId);
-  if (idx !== -1) {
-    cur.attendees[idx].count += n;
-  } else {
-    const left = cur.max - total(cur.attendees);
-    if (left > 0) {
-      const take = Math.min(n, left);
-      cur.attendees.push({ userId, name, count: take });
-      if (n > take) {
-        const remain = n - take;
-        const widx = indexByUserId(cur.waitlist, userId);
-        if (widx !== -1) cur.waitlist[widx].count += remain;
-        else cur.waitlist.push({ userId, name, count: remain });
-      }
-    } else {
-      const widx = indexByUserId(cur.waitlist, userId);
-      if (widx !== -1) cur.waitlist[widx].count += n;
-      else cur.waitlist.push({ userId, name, count: n });
-    }
-  }
-  saveDB();
-  return replyList(event.replyToken, cur);
-}
-
-async function handleMinusN(event, n) {
-  const cur = findCurrentEvent();
-  if (!cur) {
-    return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次，請管理員 /new 建立' });
-  }
-  ensureCounts(cur.attendees);
-  ensureCounts(cur.waitlist);
-
-  const userId = event.source.userId;
-
-  let idx = indexByUserId(cur.attendees, userId);
-  if (idx !== -1) {
-    cur.attendees[idx].count -= n;
-    if (cur.attendees[idx].count <= 0) cur.attendees.splice(idx, 1);
-  } else {
-    idx = indexByUserId(cur.waitlist, userId);
-    if (idx !== -1) {
-      cur.waitlist[idx].count -= n;
-      if (cur.waitlist[idx].count <= 0) cur.waitlist.splice(idx, 1);
-    } else {
-      return client.replyMessage(event.replyToken, { type: 'text', text: '你目前不在名單中～' });
-    }
-  }
-  promoteFromWaitlist(cur);
-  saveDB();
-  return replyList(event.replyToken, cur);
-}
-
-// ====== 指令 ======
-function parseNewArgs(text) {
-  // /new 2025-08-16 | 18:00-20:00 | 大安運動中心／羽10 [max=8] [title=週六羽球]
-  const body = text.replace(/^\/new\s*/i, '');
-  const parts = body.split('|').map(s => s.trim());
-  if (parts.length < 3) return null;
-  let [date, timeRange, location, ...rest] = parts;
-  let max = 8;
-  let title = '本週羽球';
-  rest.forEach(seg => {
-    const m1 = seg.match(/max\s*=\s*(\d+)/i);
-    const m2 = seg.match(/title\s*=\s*(.+)/i);
-    if (m1) max = Math.max(1, parseInt(m1[1], 10));
-    if (m2) title = m2[1].trim();
+  saveDB(db);
+  return client.replyMessage(event.replyToken, {
+    type: 'text',
+    text: `已為 ${name} 在 ${e.date} 場次 +${n}`,
+    quickReply: quickReplyChoose('+1'),
   });
-  return { date, timeRange, location, max, title };
 }
 
-async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') return;
+async function handleMinusNForEvent(event, n, e) {
+  const userId = event.source.userId;
+  const name = await getDisplayName(userId);
 
-  const text = (event.message.text || '').trim();
-  const lower = text.toLowerCase();
-
-  // +N / -N
-  const pm = parsePlusMinus(lower);
-  if (pm) return pm.sign === '+' ? handlePlusN(event, pm.n) : handleMinusN(event, pm.n);
-
-  // list / 名單
-  if (lower === 'list' || text === '名單') {
-    const cur = findCurrentEvent();
-    if (!cur) return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次，請管理員 /new 建立' });
-    return replyList(event.replyToken, cur);
+  let m = e.attendees.find(x => x.userId === userId);
+  if (!m) {
+    return client.replyMessage(event.replyToken, { type: 'text', text: '你目前沒有在名單中。' });
+  }
+  m.count = Math.max(m.count - n, 0);
+  if (m.count <= 0) {
+    e.attendees = e.attendees.filter(x => x.userId !== userId);
   }
 
-  // /whoami
-  if (lower === '/whoami') {
-    const name = await getDisplayName(event);
-    const userId = event.source.userId || '(無)';
-    const s = `你的名稱：${name}\nuserId：${userId}`;
-    return client.replyMessage(event.replyToken, { type: 'text', text: s });
+  saveDB(db);
+  return client.replyMessage(event.replyToken, {
+    type: 'text',
+    text: `已為 ${name} 在 ${e.date} 場次 -${n}`,
+    quickReply: quickReplyChoose('-1'),
+  });
+}
+
+// ====== 建立場次 (/new) ======
+// 格式：/new YYYY-MM-DD | HH:MM-HH:MM | 地點
+function parseNewPayload(s) {
+  // 以 | 分段
+  const parts = s.split('|').map(t => t.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+
+  const date = parts[0];
+  const timeRange = parts[1] || '';
+  const location = parts[2] || '';
+  let title = parts[3] || '週末羽球';
+  let max = parseInt(parts[4] || DEFAULT_MAX, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  if (!Number.isFinite(max) || max < 1) max = DEFAULT_MAX;
+
+  return { date, timeRange, location, title, max };
+}
+
+async function handleNew(event, payload) {
+  const userId = event.source.userId || '';
+  if (!isAdmin(userId)) {
+    return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以建立場次喔～' });
   }
 
-  // /new（白名單管理員）
-  if (lower.startsWith('/new')) {
-    const userId = event.source.userId;
-    if (!isAdmin(userId)) {
-      return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以建立場次喔～' });
-    }
-    const args = parseNewArgs(text);
-    if (!args) {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '格式：/new 2025-08-16 | 18:00-20:00 | 大安運動中心／羽10 [max=8] [title=週六羽球]'
-      });
-    }
-    const event_id = `evt_${Date.now()}`;
-    const cur = {
-      event_id,
-      title: args.title,
-      date: args.date,
-      timeRange: args.timeRange,
-      location: args.location,
-      max: args.max,
+  const p = parseNewPayload(payload);
+  if (!p) {
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '格式錯誤，請用：\n/new YYYY-MM-DD | HH:MM-HH:MM | 地點',
+    });
+  }
+
+  let e = findEventByDate(p.date);
+  if (e) {
+    // 同日期已存在 → 覆蓋更新
+    e.timeRange = p.timeRange;
+    e.location = p.location;
+    e.title = p.title || e.title || '週末羽球';
+    e.max = p.max || e.max || DEFAULT_MAX;
+    e.status = 'open';
+  } else {
+    e = {
+      date: p.date,
+      timeRange: p.timeRange,
+      location: p.location,
+      title: p.title || '週末羽球',
+      max: p.max || DEFAULT_MAX,
       status: 'open',
       attendees: [],
-      waitlist: [],
-      createdAt: new Date().toISOString(),
     };
-    db.events.push(cur);
-    db.current_event_id = event_id;
-    saveDB();
-
-    await client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '本週羽球報名開放～',
-      quickReply: quickReplyDefault(),
-    });
-    return replyList(event.replyToken, cur);
+    db.events.push(e);
   }
+  saveDB(db);
 
-  // /open / /close（白名單管理員）
-  if (lower === '/open' || lower === '/close') {
-    const userId = event.source.userId;
-    if (!isAdmin(userId)) return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以操作～' });
-    const cur = findCurrentEvent();
-    if (!cur) return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次。' });
-    cur.status = lower === '/open' ? 'open' : 'closed';
-    saveDB();
-    return replyList(event.replyToken, cur);
-  }
-
-  // /reset（白名單管理員）
-  if (lower === '/reset') {
-    const userId = event.source.userId;
-    if (!isAdmin(userId)) return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以操作～' });
-    const cur = findCurrentEvent();
-    if (!cur) return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次。' });
-    cur.attendees = [];
-    cur.waitlist = [];
-    saveDB();
-    return replyList(event.replyToken, cur);
-  }
-
-  // /send（白名單管理員）
-  if (lower === '/send') {
-    const userId = event.source.userId;
-    if (!isAdmin(userId)) return client.replyMessage(event.replyToken, { type: 'text', text: '只有管理員可以操作～' });
-    const cur = findCurrentEvent();
-    if (!cur) return client.replyMessage(event.replyToken, { type: 'text', text: '尚未建立場次。' });
-    return replyList(event.replyToken, cur);
-  }
-
-  // help
-  if (lower === 'help' || lower === '/help') {
-    const helpText =
-      '指令：\n' +
-      '• +1 / -1：報名或取消\n' +
-      '• +N / -N：一次加減人數（例如 +3）\n' +
-      '• list / 名單：查看名單\n' +
-      '• /new yyyy-mm-dd | 18:00-20:00 | 地點 [max=8]：建立場次（管理員）\n' +
-      '• /open / /close：開關報名（管理員）\n' +
-      '• /reset：重置名單（管理員）\n' +
-      '• /send：重新貼名單（管理員）\n' +
-      '• /whoami：顯示 userId';
-    return client.replyMessage(event.replyToken, { type: 'text', text: helpText, quickReply: quickReplyDefault() });
-  }
-
-  return;
+  // 建完立即顯示卡片
+  return client.replyMessage(event.replyToken, flexEventCard(e));
 }
 
-// ====== 啟動伺服器 ======
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server on ${PORT}`));
+// ====== /send：把目前 open 的兩場貼出卡片 ======
+async function handleSend(event) {
+  return sendEventCards(event.replyToken);
+}
+
+// ====== 路由（Webhook） ======
+app.post('/webhook', async (req, res) => {
+  const events = req.body.events || [];
+  const results = await Promise.all(events.map(handleEvent));
+  res.json(results);
+});
+
+async function handleEvent(event) {
+  if (event.type !== 'message' || event.message.type !== 'text') return null;
+
+  const text = (event.message.text || '').trim();
+
+  // /new
+  const newMatch = text.match(/^\/new\s+(.+)/i);
+  if (newMatch) {
+    return handleNew(event, newMatch[1]);
+  }
+
+  // /send
+  if (/^\/send$/i.test(text)) {
+    return handleSend(event);
+  }
+
+  // 名單 [date]
+  const listParsed = parseListWithDate(text);
+  if (listParsed) {
+    let target = listParsed.date ? findEventByDate(listParsed.date) : null;
+    if (!target) {
+      const opens = openEventsSorted();
+      if (opens.length === 0) {
+        return client.replyMessage(event.replyToken, { type: 'text', text: '目前沒有開放場次。' });
+      }
+      if (opens.length > 1 && !listParsed.date) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '請選擇要查看的場次：',
+          quickReply: {
+            items: openEventsSorted().slice(0, 4).map(e => ({
+              type: 'action',
+              action: { type: 'message', label: e.date.slice(5), text: `名單 ${e.date}` },
+            })),
+          },
+        });
+      }
+      target = opens[0];
+    }
+    return replyList(event.replyToken, target);
+  }
+
+  // +N / -N [date]
+  const pm = parsePlusMinusWithDate(text);
+  if (pm) {
+    let target = pm.date ? findEventByDate(pm.date) : null;
+    if (!target) {
+      const opens = openEventsSorted();
+      if (opens.length === 0) {
+        return client.replyMessage(event.replyToken, { type: 'text', text: '目前沒有開放場次。' });
+      }
+      if (opens.length > 1 && !pm.date) {
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '請選擇要報名的場次：',
+          quickReply: quickReplyChoose(pm.sign === '+' ? '+1' : '-1'),
+        });
+      }
+      target = opens[0];
+    }
+    if (pm.sign === '+') return handlePlusNForEvent(event, pm.n, target);
+    return handleMinusNForEvent(event, pm.n, target);
+  }
+
+  // 其他情況不回或回簡短說明
+  return client.replyMessage(event.replyToken, {
+    type: 'text',
+    text: '指令：\n' +
+      '・/new YYYY-MM-DD | HH:MM-HH:MM | 地點 |（可選標題）|（可選名額）\n' +
+      '・/send（貼出兩場卡片）\n' +
+      '・+1 / -1（有多場會跳選單）\n' +
+      '・+3 2025-08-16（指定日期）\n' +
+      '・名單 / 名單 2025-08-16',
+  });
+}
+
+// ====== 啟動 ======
+app.listen(PORT, () => {
+  console.log(`Server on ${PORT}`);
+});
