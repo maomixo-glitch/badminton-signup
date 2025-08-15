@@ -1,87 +1,133 @@
-// index.js — Badminton Signup Bot (Full Feature Stable)
+// ===============================
+//  LINE 羽球報名 Bot（完整版）
+//  功能：/new、+N/-N、list、多場選擇、顯示姓名、同聊天室隔離、容量上限、過期自動忽略
+// ===============================
 
-import express from "express";
-import * as line from "@line/bot-sdk";
+const express = require("express");
+const line = require("@line/bot-sdk");
 
-// ====== LINE Config ======
+// ---- 環境設定 ----
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
 };
+const PORT = process.env.PORT || 3000;
+const DEFAULT_MAX = 10; // 預設人數上限
+const MAX_ADD_PER_ONCE = 10; // 一次最多 +N
 
-// ====== In-Memory Data ======
-const eventsData = {
-  events: {}, // eventId -> event
+// ---- 建立應用與 LINE 客戶端 ----
+const app = express();
+const client = new line.Client(config);
+
+// ---- 記憶體中的資料（可之後換成檔案/資料庫）----
+const db = {
+  lastId: 0,
+  events: {
+    // [id]: { id, chatId, date:'YYYY-MM-DD', timeRange:'HH:MM-HH:MM', location, court, max, attendees: [{userId, name, count}], createdAt }
+  },
 };
 
-// quick id
-const uid = () => Math.random().toString(36).slice(2, 10);
-
-// ====== Helpers ======
-function pad2(n) {
-  return String(n).padStart(2, "0");
+// ===============================
+// 工具：聊天室 scope（讓不同群組的場次彼此不干擾）
+// ===============================
+function getScopeKey(source) {
+  if (source.type === "group") return `g:${source.groupId}`;
+  if (source.type === "room") return `r:${source.roomId}`;
+  return `u:${source.userId}`;
 }
 
-// 8/23 -> 2025-08-23（會用今年）
+// ===============================
+// 工具：取 LINE 顯示名稱（1:1 / 群組 / 多人聊天室）
+// ===============================
+async function getDisplayName(client, source) {
+  try {
+    if (source.type === "group") {
+      const p = await client.getGroupMemberProfile(source.groupId, source.userId);
+      return p.displayName;
+    } else if (source.type === "room") {
+      const p = await client.getRoomMemberProfile(source.roomId, source.userId);
+      return p.displayName;
+    } else {
+      const p = await client.getProfile(source.userId);
+      return p.displayName;
+    }
+  } catch (e) {
+    return `玩家${(source.userId || "").slice(-4)}`;
+  }
+}
+
+// ===============================
+// 工具：日期字串 & 過期判定
+// ===============================
+function pad2(n) {
+  return n.toString().padStart(2, "0");
+}
+
 function toYYYYMMDDFromMD(md) {
-  const [m, d] = md.split("/").map((x) => parseInt(x, 10));
+  // md: "8/23"
+  const [m, d] = md.split("/").map((v) => parseInt(v, 10));
   const now = new Date();
   const y = now.getFullYear();
   return `${y}-${pad2(m)}-${pad2(d)}`;
 }
 
-function nowISODate() {
-  const now = new Date();
-  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+function isExpiredEvent(e) {
+  // 日期 + 結束時間 前已過
+  const [start, end] = e.timeRange.split("-");
+  const dtEnd = new Date(`${e.date}T${end}:00+09:00`); // +09:00 只是避免時區誤差，實際上無影響
+  return Date.now() > dtEnd.getTime();
 }
 
-// 判斷是否過期：日期 < 今日
-function isExpiredEvent(evt) {
-  const today = nowISODate();
-  return evt.date < today;
+function activeEventsIn(source) {
+  const scope = getScopeKey(source);
+  return Object.values(db.events).filter((e) => !isExpiredEvent(e) && e.chatId === scope);
 }
 
-function activeEvents() {
-  return Object.values(eventsData.events).filter((e) => !isExpiredEvent(e));
+// ===============================
+// 工具：+N / -N 解析
+// ===============================
+function parsePlusMinus(text) {
+  const m = text.trim().match(/^([+-])\s*(\d+)(?:\s*@\s*(\d{1,2}\/\d{1,2}))?$/i);
+  if (!m) return null;
+  let n = Math.min(parseInt(m[2], 10), MAX_ADD_PER_ONCE);
+  const sign = m[1] === "-" ? -1 : 1;
+  const md = m[3] || null; // 可帶 @8/23 指定場次
+  return { delta: sign * n, md };
 }
 
-function findEventByDateStr(dateMD) {
-  const iso = toYYYYMMDDFromMD(dateMD);
-  return Object.values(eventsData.events).find((e) => e.date === iso);
+function totalCount(e) {
+  return e.attendees.reduce((a, m) => a + (m.count || 0), 0);
 }
 
-function findLatestEvent() {
-  const arr = activeEvents();
-  if (arr.length === 0) return null;
-  arr.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-  return arr[arr.length - 1];
+function findMemberIndex(e, userId) {
+  return e.attendees.findIndex((m) => m.userId === userId);
 }
 
-// ====== 解析 /new 輸入 ======
-/**
- * 支援兩種：
- * /new 8/23 15:00-17:00 大安運動中心 羽10
- * /new 2025-08-23 15:00-17:00 大安運動中心 羽10
- */
-function fromNewInputToEventObj(input) {
-  const s = input.replace(/^\/new\s*/i, "").trim();
+// ===============================
+// 新場次輸入解析（/new M/D HH:MM-HH:MM 地點 [場地(例：羽10)]）
+// 也接受：/new YYYY-MM-DD HH:MM-HH:MM 地點 場地
+// 場地尾段如果像「羽10」會自動解析出 max=10；若沒數字，max=DEFAULT_MAX。
+// ===============================
+function parseNewInput(raw) {
+  const s = raw.replace(/^\/new\s*/i, "").trim();
   const parts = s.split(/\s+/).filter(Boolean);
   if (parts.length < 3) return null;
 
   let dateRaw = parts[0];
   let timeRange = parts[1];
 
-  // 其餘視為地點＋最後一段視為場地（可不填）
-  let tail = parts.slice(2);
-  let court = "";
+  // 地點與場地（最後一段視為場地，沒有就只地點）
+  const tail = parts.slice(2);
   let location = "";
+  let court = "";
   if (tail.length >= 2) {
     court = tail[tail.length - 1];
     location = tail.slice(0, -1).join(" ");
   } else {
-    location = tail[0] || "";
+    location = tail[0];
   }
 
+  // 日期轉成 YYYY-MM-DD
   let yyyyMMDD = "";
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
     yyyyMMDD = dateRaw;
@@ -91,124 +137,67 @@ function fromNewInputToEventObj(input) {
     return null;
   }
 
-  if (!/^\d{2}:\d{2}-\d{2}:\d{2}$/.test(timeRange)) return null;
+  if (!/^\d{2}:\d{2}\-\d{2}:\d{2}$/.test(timeRange)) return null;
 
-  // 預設名額從場地尾數嘗試抓，例如「羽10」抓 10；抓不到給 10
-  let max = 10;
-  const mCourt = court.match(/(\d+)$/);
-  if (mCourt) {
-    max = Math.max(1, parseInt(mCourt[1], 10));
+  // 解析上限：從 court 取數字（像「羽10」→ 10），沒有就 10
+  let max = DEFAULT_MAX;
+  const mMax = court.match(/(\d+)/);
+  if (mMax) {
+    max = Math.max(1, parseInt(mMax[1], 10));
   }
 
-  return {
-    date: yyyyMMDD,
-    timeRange,
-    location,
-    court,
-    max,
-  };
+  return { date: yyyyMMDD, timeRange, location, court, max };
 }
 
-// ====== 格式化訊息 ======
+// ===============================
+// 訊息模板
+// ===============================
 function formatEventHeader(e) {
-  // 顯示 08-23(五) 等
   const dt = new Date(e.date);
-  const weekday = ["日","一","二","三","四","五","六"][dt.getDay()];
-  const md = `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}(${weekday})`;
-
+  const w = "日一二三四五六".charAt(dt.getDay());
+  const md = `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}(${w})`;
   return [
-    "🏸 週末羽球報名開始！",
+    "📌 週末羽球報名開放！",
     `📅 ${md}`,
     `⏰ ${e.timeRange}`,
-    `📍 ${e.location}${e.court ? " ／ " + e.court : ""}`,
-    `👥 名額：${e.max} 人`,
-    "",
+    `📍 ${e.location}${e.court ? "／" + e.court : ""}`,
+    "====================",
     "📝 報名方式：",
-    "• +1 ：只有自己 (1人)",
-    "• +2 ：自己+朋友 (2人)",
+    "• +1：自己 (1人)",
+    "• +2：自己+朋友 (2人)",
     "• -1：自己取消",
+    "• 多場同時開放時，會讓你挑日期",
     "",
     "輸入「list」查看報名狀況",
   ].join("\n");
 }
 
 function renderRosterText(e) {
-  // 僅顯示有報名的人（不列 1..10 空行）
-  const cur = e.attendees.reduce((a, m) => a + m.count, 0);
-  const lines = [];
-
-  // 標題
   const dt = new Date(e.date);
-  const weekday = ["日","一","二","三","四","五","六"][dt.getDay()];
-  const md = `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}(${weekday})`;
+  const w = "日一二三四五六".charAt(dt.getDay());
+  const md = `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}(${w})`;
+  const lines = [];
   lines.push("📌 週末羽球");
   lines.push(`📅 ${md}`);
   lines.push(`⏰ ${e.timeRange}`);
-  lines.push(`📍 ${e.location}${e.court ? " ／ " + e.court : ""}`);
+  lines.push(`📍 ${e.location}${e.court ? "／" + e.court : ""}`);
   lines.push("====================");
-  lines.push(`✅ 正式名單 (${cur}/${e.max}人)：`);
-
+  const cur = totalCount(e);
+  lines.push(`✅ 正式名單 (${cur}/${e.max} 人)：`);
   if (e.attendees.length === 0) {
     lines.push("(目前還沒有人報名～)");
   } else {
     e.attendees.forEach((m, i) => {
-      lines.push(`${i + 1}. ${m.name} (+${m.count})`);
+      const extra = m.count > 1 ? ` (+${m.count - 1})` : "";
+      lines.push(`${i + 1}. ${m.name}${extra}`);
     });
   }
-
   return lines.join("\n");
 }
 
-function briefEventLine(e) {
-  const dt = new Date(e.date);
-  const weekday = ["日","一","二","三","四","五","六"][dt.getDay()];
-  const md = `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}(${weekday})`;
-  const cur = e.attendees.reduce((a, m) => a + m.count, 0);
-  return `• ${md} ${e.timeRange}｜${e.location}${e.court ? "／" + e.court : ""}（${cur}/${e.max}）`;
-}
-
-// ====== 報名處理 ======
-function totalCount(e) {
-  return e.attendees.reduce((a, m) => a + m.count, 0);
-}
-
-function addOrDeltaUser(e, userId, name, delta) {
-  // 累加（同人多次 + 會疊上去；- 只扣自己的那部分）
-  const cur = e.attendees.find((x) => x.userId === userId);
-  if (!cur) {
-    if (delta > 0) {
-      e.attendees.push({ userId, name, count: delta });
-    }
-  } else {
-    cur.count += delta;
-  }
-  // 移除 count<=0 的人
-  e.attendees = e.attendees.filter((x) => x.count > 0);
-
-  // 若超過 max，回退本次變更
-  let sum = totalCount(e);
-  if (sum > e.max) {
-    // 回退
-    if (!cur) {
-      // 本次剛新增
-      e.attendees = e.attendees.filter((x) => x.userId !== userId);
-    } else {
-      cur.count -= delta;
-      if (cur.count <= 0) {
-        e.attendees = e.attendees.filter((x) => x.userId !== userId);
-      }
-    }
-    return { ok: false, reason: "full" };
-  }
-
-  return { ok: true, sum };
-}
-
-// ====== 多場選擇：用 Quick Reply 讓使用者點日期 ======
-// 當使用者輸入「+3」但目前有 2 場以上，就丟出日期選擇。
-// 按鈕的 text 會是「+3 @8/23」=> 可讀！
-function makeDateQuickReply(delta) {
-  const items = activeEvents().map((e) => {
+function quickReplyChooseDate(delta, source) {
+  const acts = activeEventsIn(source);
+  const items = acts.map((e) => {
     const d = new Date(e.date);
     const md = `${d.getMonth() + 1}/${d.getDate()}`;
     return {
@@ -216,35 +205,31 @@ function makeDateQuickReply(delta) {
       action: {
         type: "message",
         label: md,
-        text: `${delta >= 0 ? "+" : ""}${delta} @${md}`,
+        text: `${delta >= 0 ? "+" : ""}${Math.abs(delta)} @${md}`,
       },
     };
   });
-  return items;
+  return { items };
 }
 
-// 解析「+3 @8/23」或「-2 @9/01」
-function parsePlusMinusWithDate(text) {
-  const m = text.trim().match(/^([+\-]\d+)\s*@\s*(\d{1,2}\/\d{1,2})$/);
-  if (!m) return null;
-  const delta = parseInt(m[1], 10);
-  const dateMD = m[2];
-  return { delta, dateMD };
-}
-
-// ====== 指令處理 ======
+// ===============================
+// Handlers
+// ===============================
 async function handleNew(client, event, text) {
-  const info = fromNewInputToEventObj(text);
+  // 任何人都可以建立場次（你說不用限制管理員）
+  const info = parseNewInput(text);
   if (!info) {
     return client.replyMessage(event.replyToken, {
       type: "text",
-      text: "格式錯誤。\n請用：/new 8/23 15:00-17:00 大安運動中心 羽10",
+      text: "格式錯誤唷～\n例：/new 8/23 15:00-17:00 大安運動中心 羽10",
     });
   }
+  const chatId = getScopeKey(event.source);
+  const id = `evt_${++db.lastId}`;
 
-  const id = uid();
-  eventsData.events[id] = {
+  db.events[id] = {
     id,
+    chatId,
     date: info.date,
     timeRange: info.timeRange,
     location: info.location,
@@ -254,134 +239,130 @@ async function handleNew(client, event, text) {
     createdAt: Date.now(),
   };
 
-  return client.replyMessage(event.replyToken, {
-    type: "text",
-    text: `已建立活動：${text.replace(/^\/new\s*/i, "").trim()}`,
-  });
+  const header = formatEventHeader(db.events[id]);
+  const roster = renderRosterText(db.events[id]);
+  return client.replyMessage(event.replyToken, [
+    { type: "text", text: `已建立活動：${info.date.replace(/^(\d{4})-/, "")} ${info.timeRange} ${info.location} ${info.court}` },
+    { type: "text", text: header },
+    { type: "text", text: roster },
+  ]);
 }
 
 async function handleList(client, event) {
-  const acts = activeEvents();
+  const acts = activeEventsIn(event.source);
   if (acts.length === 0) {
-    return client.replyMessage(event.replyToken, { type: "text", text: "目前沒有開放中的場次唷～" });
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有開放中的場次唷～",
+    });
   }
-
-  // 每場傳一條（或你要合併成一條也可）
   const msgs = acts.map((e) => ({ type: "text", text: renderRosterText(e) }));
   return client.replyMessage(event.replyToken, msgs);
 }
 
-async function handlePlusMinus(client, event, delta) {
-  const acts = activeEvents();
-  if (acts.length === 0) {
+async function handlePlusMinus(client, event, text) {
+  const pm = parsePlusMinus(text);
+  if (!pm) {
+    return client.replyMessage(event.replyToken, { type: "text", text: "格式錯誤，請輸入 +1 或 -1（或 +2, +3...）" });
+  }
+  let { delta, md } = pm;
+
+  let targets = activeEventsIn(event.source);
+  if (targets.length === 0) {
     return client.replyMessage(event.replyToken, { type: "text", text: "目前沒有開放中的場次唷～" });
   }
-  // 有多場 → 用 quick reply 讓用戶選日期，文字像「+3 @8/23」
-  if (acts.length > 1) {
+
+  // 如果有多場但沒有指定日期，跳出日期 quickReply
+  if (targets.length > 1 && !md) {
     return client.replyMessage(event.replyToken, {
       type: "text",
       text: "你想套用到哪一天？",
-      quickReply: {
-        items: makeDateQuickReply(delta),
-      },
+      quickReply: quickReplyChooseDate(delta, event.source),
     });
   }
-  // 只有一場 → 直接套用
-  const e = acts[0];
-  const name = await getDisplayName(event.source.userId);
-  const ret = addOrDeltaUser(e, event.source.userId, name, delta);
-  if (!ret.ok && ret.reason === "full") {
-    return client.replyMessage(event.replyToken, { type: "text", text: "❌ 本場人數已達上限～" });
+
+  // 有指定日期（+1 @8/23）
+  if (md) {
+    const ym = toYYYYMMDDFromMD(md);
+    targets = targets.filter((e) => e.date === ym);
+    if (targets.length === 0) {
+      return client.replyMessage(event.replyToken, { type: "text", text: `找不到 ${md} 的場次唷～` });
+    }
   }
-  return client.replyMessage(event.replyToken, {
-    type: "text",
-    text: `✅ ${name} 報名 ${delta > 0 ? delta : -delta} 人${delta > 0 ? "成功" : "已取消部份"}\n目前：${totalCount(e)}/${e.max}`,
-  });
+
+  const e = targets[0];
+  const name = await getDisplayName(client, event.source);
+  const userId = event.source.userId;
+
+  // 場次已滿 / 容量檢查
+  if (delta > 0) {
+    const left = e.max - totalCount(e);
+    if (left <= 0) {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "❌ 本場次已達上限，下次早點報名(๑•́ ₃ •̀๑)",
+      });
+    }
+    if (delta > left) delta = left; // 超過上限就縮到剩餘名額
+  }
+
+  // 加總 / 扣減
+  let idx = findMemberIndex(e, userId);
+  if (idx === -1) {
+    if (delta <= 0) {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "你還沒有報名唷～",
+      });
+    }
+    e.attendees.push({ userId, name, count: delta });
+  } else {
+    e.attendees[idx].name = name; // 更新一下名字（有改暱稱也會更新）
+    e.attendees[idx].count += delta;
+    if (e.attendees[idx].count <= 0) {
+      e.attendees.splice(idx, 1);
+    }
+  }
+
+  const cur = totalCount(e);
+  const okText =
+    delta > 0
+      ? `✅ ${name} 報名 ${delta} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${e.max}`
+      : `✅ ${name} 已取消 ${Math.abs(delta)} 人 ( ˘･з･) \n目前：${cur}/${e.max}`;
+
+  return client.replyMessage(event.replyToken, [
+    { type: "text", text: okText },
+    { type: "text", text: renderRosterText(e) },
+  ]);
 }
 
-async function handlePlusMinusWithDateText(client, event, text) {
-  const parsed = parsePlusMinusWithDate(text);
-  if (!parsed) return false;
-  const { delta, dateMD } = parsed;
-  const e = findEventByDateStr(dateMD);
-  if (!e || isExpiredEvent(e)) {
-    await client.replyMessage(event.replyToken, { type: "text", text: "找不到對應的場次或該場次已過期～" });
-    return true;
-  }
-  const name = await getDisplayName(event.source.userId);
-  const ret = addOrDeltaUser(e, event.source.userId, name, delta);
-  if (!ret.ok && ret.reason === "full") {
-    await client.replyMessage(event.replyToken, { type: "text", text: "❌ 本場人數已達上限～" });
-    return true;
-  }
-  await client.replyMessage(event.replyToken, {
-    type: "text",
-    text: `✅ ${name} 已套用到 ${dateMD}：${delta > 0 ? "+" : ""}${delta}\n目前：${totalCount(e)}/${e.max}`,
-  });
-  return true;
-}
-
-async function getDisplayName(userId) {
-  // LINE 官方帳號必須將 bot 加入群組或好友才能拿到名字；拿不到就用 userId 末4碼
-  try {
-    // 你若用 group，這裡可改用 getGroupMemberProfile(event.source.groupId, userId)
-    return `玩家${userId.slice(-4)}`;
-  } catch (e) {
-    return `玩家${userId.slice(-4)}`;
-  }
-}
-
-// ====== Express + LINE webhook ======
-const app = express();
-
+// ===============================
+// Webhook
+// ===============================
 app.post("/webhook", line.middleware(config), async (req, res) => {
-  const client = new line.Client(config);
   const results = await Promise.all(
-    req.body.events.map(async (ev) => {
-      if (ev.type !== "message" || ev.message.type !== "text") return;
-      const text = ev.message.text.trim();
+    req.body.events.map(async (event) => {
+      if (event.type !== "message" || event.message.type !== "text") return;
+      const text = (event.message.text || "").trim();
 
-      // 先試：+N @8/23 這種形式（使用者點 quick reply）
-      const handled = await handlePlusMinusWithDateText(client, ev, text);
-      if (handled) return;
-
-      // /new
+      // 指令路由
       if (/^\/new\s+/i.test(text)) {
-        return handleNew(client, ev, text);
+        return handleNew(client, event, text);
       }
-
-      // list
       if (/^list$/i.test(text)) {
-        return handleList(client, ev);
+        return handleList(client, event);
+      }
+      if (/^[+-]\s*\d+/.test(text)) {
+        return handlePlusMinus(client, event, text);
       }
 
-      // +N / -N
-      const m = text.match(/^([+\-]\d+)$/);
-      if (m) {
-        const delta = parseInt(m[1], 10);
-        // 限制單次 ±10，避免誤觸
-        if (Math.abs(delta) > 10) {
-          return client.replyMessage(ev.replyToken, { type: "text", text: "單次變更請在 ±10 人以內唷～" });
-        }
-        return handlePlusMinus(client, ev, delta);
-      }
-
-      // /help
-      if (/^\/help$/i.test(text) || /^\/\?$/.test(text)) {
-        return client.replyMessage(ev.replyToken, {
-          type: "text",
-          text:
-            "指令：\n" +
-            "• /new 8/23 15:00-17:00 大安運動中心 羽10\n" +
-            "• +1 / +2 / -1（多場會跳出日期選擇）\n" +
-            "• list（查看各場名單）",
-        });
-      }
+      // 非指令可忽略或回個提示
+      return;
     })
   );
   res.json(results);
 });
 
-app.get("/", (_, res) => res.send("OK"));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server on", PORT));
+// 健康檢查 & 啟動
+app.get("/", (req, res) => res.send("OK"));
+app.listen(PORT, () => console.log(`Server on ${PORT}`));
