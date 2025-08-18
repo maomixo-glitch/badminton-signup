@@ -1,3 +1,1 @@
-{
-  "events": {}
-}
+{ "config": { "defaultMax": 8 }, "events": {}, "names": {} }
