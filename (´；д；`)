@@ -389,7 +389,7 @@ async function handleEvent(evt) {
       removePeople(targetEvt, userId, n);
       saveDB(db);
       const cur = totalCount(targetEvt.attendees);
-      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (´；д；`)\n目前：${cur}/${targetEvt.max}`;
+      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (˘•ω•˘) \n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, [
         { type:'text', text: msg1 },
         renderEventCard(targetEvt),
