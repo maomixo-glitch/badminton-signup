@@ -369,7 +369,7 @@ async function handleEvent(evt) {
       '輸入「list」查看報名狀況',
     ].join('\n');
 
-// 背景寫入：建立活動
+// 背景寫入：建立活動（保留這段即可）
 (async () => {
   const who = await resolveDisplayName(evt);
   logToSheet([
@@ -380,24 +380,12 @@ async function handleEvent(evt) {
     `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
   ]).catch(e => console.warn('logToSheet new failed:', e.message));
 })();
-    
-    logToSheet([
-  new Date().toISOString(),
-  await resolveDisplayName(evt),
-  evt.source.userId || '',
-  'new',
-  `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
-]).catch(e => console.warn('logToSheet new failed:', e.message));
 
+// ✅ 單一回覆
 return client.replyMessage(evt.replyToken, [
   { type: 'text', text: msg },
   renderEventCard(db.events[id]),
 ]);
-
-    return client.replyMessage(evt.replyToken, [
-      { type: 'text', text: msg },
-      renderEventCard(db.events[id]),
-    ]);
   }
 
   // list
@@ -448,15 +436,6 @@ return client.replyMessage(evt.replyToken, [
 
   const cur = totalCount(targetEvt.attendees);   // 先算最新人數
 
-  // 建議不要 await，避免拖慢回覆（見下段）
-  logToSheet([
-    new Date().toISOString(),
-    name,
-    userId,
-    `+${n}@${targetEvt.date}`,
-    `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
-  ]).catch(e => console.warn('logToSheet add failed:', e.message));
-
 // 背景寫入：報名
 logToSheet([
   new Date().toISOString(),
@@ -484,6 +463,10 @@ logToSheet([
       // 減人
       removePeople(targetEvt, userId, n);
       saveDB(db);
+      
+const cur = totalCount(targetEvt.attendees); // 先算 cur 再寫入
+      
+// 背景寫入：取消
 logToSheet([
   new Date().toISOString(),
   name,
@@ -492,10 +475,9 @@ logToSheet([
   `-${Math.abs(n)}@${targetEvt.date}`,
   `cur=${cur}/${targetEvt.max}`
 ]).catch(e => console.warn('logToSheet remove failed:', e.message));
-      
-      const cur = totalCount(targetEvt.attendees);
-      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
-      return client.replyMessage(evt.replyToken, [
+
+const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
+return client.replyMessage(evt.replyToken, [
   { type: 'text', text: msg1 },
   renderEventCard(targetEvt),
 ]);
