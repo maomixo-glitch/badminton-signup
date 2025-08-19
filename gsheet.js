@@ -26,18 +26,18 @@ async function readConfig(auth) {
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SHEET_ID,
-    range: "config!A1",
+    range: "config!A:C",
   });
   const txt = (res.data.values && res.data.values[0] && res.data.values[0][0]) || "";
   return txt ? JSON.parse(txt) : {};
 }
 
-// 寫回 config!A1
+// 寫回 config!A:C
 async function writeConfig(auth, obj) {
   const sheets = google.sheets({ version: "v4", auth });
   await sheets.spreadsheets.values.update({
     spreadsheetId: process.env.SHEET_ID,
-    range: "config!A1",
+    range: "config!A:C",
     valueInputOption: "RAW",
     requestBody: { values: [[JSON.stringify(obj)]] },
   });
