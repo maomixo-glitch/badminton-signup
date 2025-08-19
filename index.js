@@ -5,6 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const line = require('@line/bot-sdk');
+const { getAuthFromEnv, appendRow } = require('./gsheet');
+
+// 懶初始化：第一筆要寫入時才去拿 auth；成功後緩存起來
+let SHEET_AUTH = null;
+async function logToSheet(values) {
+  try {
+    if (!SHEET_AUTH) SHEET_AUTH = await getAuthFromEnv();
+    await appendRow(SHEET_AUTH, values);
+  } catch (e) {
+    console.warn('logToSheet failed:', e.message);
+  }
+}
 
 // ====== 環境變數 ======
 const {
@@ -27,12 +39,12 @@ const app = express();
 
 app.get('/healthz', (_, res) => res.send('ok'));
 app.post('/webhook', line.middleware(config), async (req, res) => {
-  try {
-    const results = await Promise.all(req.body.events.map(handleEvent));
-    res.json(results);
-  } catch (e) {
-    console.error(e);
-    res.status(500).end();
+  // 先回 200，避免 LINE 等太久（冷啟動／IO 造成超時）
+  res.status(200).end();
+
+  // 背景處理
+  for (const e of req.body.events) {
+    handleEvent(e).catch(err => console.error('handleEvent error:', err));
   }
 });
 
@@ -357,6 +369,31 @@ async function handleEvent(evt) {
       '輸入「list」查看報名狀況',
     ].join('\n');
 
+// 背景寫入：建立活動
+(async () => {
+  const who = await resolveDisplayName(evt);
+  logToSheet([
+    new Date().toISOString(),
+    who,
+    evt.source.userId || '',
+    'new',
+    `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
+  ]).catch(e => console.warn('logToSheet new failed:', e.message));
+})();
+    
+    logToSheet([
+  new Date().toISOString(),
+  await resolveDisplayName(evt),
+  evt.source.userId || '',
+  'new',
+  `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
+]).catch(e => console.warn('logToSheet new failed:', e.message));
+
+return client.replyMessage(evt.replyToken, [
+  { type: 'text', text: msg },
+  renderEventCard(db.events[id]),
+]);
+
     return client.replyMessage(evt.replyToken, [
       { type: 'text', text: msg },
       renderEventCard(db.events[id]),
@@ -406,31 +443,62 @@ async function handleEvent(evt) {
     const name = await resolveDisplayName(evt);
 
     if (sign > 0) {
-      const ret = addPeople(targetEvt, userId, name, n);
-      saveDB(db);
-      const cur = totalCount(targetEvt.attendees);
-      let msg1 = '';
-      if (ret.status === 'main') {
-        msg1 = `✅ ${name} 報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
-      } else if (ret.status === 'wait') {
-        msg1 = `🕒 ${name} 進入備取 ${ret.addedWait} 人（正取已滿）`;
-      } else {
-        msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
-      }
-      return client.replyMessage(evt.replyToken, [
-        { type: 'text', text: msg1 },
-        renderEventCard(targetEvt),
-      ]);
-    } else {
+  const ret = addPeople(targetEvt, userId, name, n);
+  saveDB(db);
+
+  const cur = totalCount(targetEvt.attendees);   // 先算最新人數
+
+  // 建議不要 await，避免拖慢回覆（見下段）
+  logToSheet([
+    new Date().toISOString(),
+    name,
+    userId,
+    `+${n}@${targetEvt.date}`,
+    `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
+  ]).catch(e => console.warn('logToSheet add failed:', e.message));
+
+// 背景寫入：報名
+logToSheet([
+  new Date().toISOString(),
+  name,
+  userId,
+  'add',
+  `+${n}@${targetEvt.date}`,
+  `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
+]).catch(e => console.warn('logToSheet add failed:', e.message));
+      
+  let msg1 = '';
+  if (ret.status === 'main') {
+    msg1 = `✅ ${name} 報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
+  } else if (ret.status === 'wait') {
+    msg1 = `🕒 ${name} 進入備取 ${ret.addedWait} 人（正取已滿）`;
+  } else {
+    msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
+  }
+
+  return client.replyMessage(evt.replyToken, [
+    { type: 'text', text: msg1 },
+    renderEventCard(targetEvt),
+  ]);
+} else {
       // 減人
       removePeople(targetEvt, userId, n);
       saveDB(db);
+logToSheet([
+  new Date().toISOString(),
+  name,
+  userId,
+  'remove',
+  `-${Math.abs(n)}@${targetEvt.date}`,
+  `cur=${cur}/${targetEvt.max}`
+]).catch(e => console.warn('logToSheet remove failed:', e.message));
+      
       const cur = totalCount(targetEvt.attendees);
       const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, [
-        { type: 'text', text: msg1 },
-        renderEventCard(targetEvt),
-      ]);
+  { type: 'text', text: msg1 },
+  renderEventCard(targetEvt),
+]);
     }
   }
 
