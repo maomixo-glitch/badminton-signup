@@ -97,7 +97,9 @@ const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNE
 const client = new line.Client(config);
 const app = express();
 
-app.get('/healthz', (_, res) => res.send('ok'));
+app.get("/healthz", (req, res) => {
+  res.status(200).send("OK");
+});
 
 // 先回 200，再背景處理，避免冷啟時 webhook 超時
 app.post('/webhook', line.middleware(config), async (req, res) => {
