@@ -1,21 +1,32 @@
 /* eslint-disable no-console */
 process.env.TZ = 'Asia/Taipei';
 
-const fs = require('fs');
-const path = require('path');
 const express = require('express');
 const line = require('@line/bot-sdk');
-const { getAuth, appendRow, readConfig, writeConfig } = require('./gsheet');
+const {
+  getAuth, appendRow, readConfig, writeConfig,
+} = require('./gsheet');
 
-// 仍保留 appendRow 的 logToSheet（你已經使用）
+// ====== Google Sheet auth 快取 ======
 let SHEET_AUTH = null;
 async function getSheetAuth() {
   if (!SHEET_AUTH) SHEET_AUTH = getAuth();
   return SHEET_AUTH;
 }
 
-// DB in memory + Google Sheet 持久化
-const DEFAULT_MAX = 8; // 你原本的
+// ====== 將操作寫入 signup 分頁的輔助函式（非同步 fire-and-forget） ======
+async function logToSheet(values) {
+  try {
+    const auth = await getSheetAuth();
+    await appendRow(auth, values);
+  } catch (e) {
+    console.warn('logToSheet failed:', e.message);
+  }
+}
+
+// ====== DB in memory + Google Sheet 持久化 ======
+const DEFAULT_MAX = 8;
+
 function ensureDBShape(db) {
   if (!db) db = {};
   if (!db.config) db.config = { defaultMax: DEFAULT_MAX };
@@ -24,7 +35,7 @@ function ensureDBShape(db) {
   return db;
 }
 
-let MEM_DB = null; // 記憶體快取，減少每次打 Sheet
+let MEM_DB = null; // 記憶體快取，降低對 Sheet 的讀取次數
 
 async function loadDB() {
   if (MEM_DB) return MEM_DB;
@@ -48,13 +59,11 @@ const mdDisp = (ymd) => {
   return `${parseInt(m, 10)}/${parseInt(d, 10)}`;
 };
 const toYYYYMMDDFromMD = (md) => {
-  // 例如 9/06 -> 當年 2025-09-06
   const [m, d] = md.split('/').map(v => parseInt(v, 10));
   const now = new Date();
   return `${now.getFullYear()}-${pad2(m)}-${pad2(d)}`;
 };
 function parseTimeRange(range) {
-  // "18:00-20:00"
   const m = range.match(/^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/);
   if (!m) return null;
   return {
@@ -82,13 +91,28 @@ function getOpenEvents(db) {
 const totalCount = (list) => list.reduce((a, m) => a + (m.count || 0), 0);
 const findIndexById = (list, id) => list.findIndex(m => m.userId === id);
 
-// ====== 顯示名稱（快取） ======
+// ====== LINE / Express ======
+const { CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, PORT = 10000 } = process.env;
+const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNEL_SECRET };
+const client = new line.Client(config);
+const app = express();
+
+app.get('/healthz', (_, res) => res.send('ok'));
+
+// 先回 200，再背景處理，避免冷啟時 webhook 超時
+app.post('/webhook', line.middleware(config), async (req, res) => {
+  res.status(200).end();
+  for (const e of req.body.events) {
+    handleEvent(e).catch(err => console.error('handleEvent error:', err));
+  }
+});
+
+// ====== 顯示名稱（快取到 DB.names） ======
 async function resolveDisplayName(evt) {
-  const db = loadDB();
+  const db = await loadDB();
   const cache = db.names;
   const userId = evt.source?.userId;
   if (!userId) return '匿名';
-
   if (cache[userId]) return cache[userId];
 
   try {
@@ -102,7 +126,7 @@ async function resolveDisplayName(evt) {
     }
     if (profile?.displayName) {
       cache[userId] = profile.displayName;
-      saveDB(db);
+      await saveDB(db);
       return profile.displayName;
     }
   } catch (e) {
@@ -113,8 +137,6 @@ async function resolveDisplayName(evt) {
 
 // ====== /new 解析 ======
 function parseNewPayload(text) {
-  // /new 9/06 18:00-20:00 大安運動中心 羽10 [max=8]
-  // /new 2025-09-06 18:00-20:00 大安運動中心 羽10
   const s = text.replace(/^\/new\s*/i, '').trim();
   const parts = s.split(/\s+/).filter(Boolean);
   if (parts.length < 3) return null;
@@ -122,10 +144,8 @@ function parseNewPayload(text) {
   const dateRaw = parts[0];
   const timeRange = parts[1];
 
-  // location + court（最後一段視為場地；可沒有）
   let tail = parts.slice(2);
   let max = DEFAULT_MAX;
-  // 末尾可能有 max=8
   const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
   if (mMax) {
     max = Math.max(1, parseInt(mMax[1], 10));
@@ -147,7 +167,6 @@ function parseNewPayload(text) {
 
   if (!parseTimeRange(timeRange)) return null;
 
-  // 若 court 有數字，如「羽10」，覆蓋 max
   const cNum = court.match(/(\d+)/);
   if (cNum) max = Math.max(1, parseInt(cNum[1], 10));
 
@@ -156,11 +175,10 @@ function parseNewPayload(text) {
 
 // ====== +N / -N 解析 ======
 function parsePlusMinus(text) {
-  // +3、-1、+2 @9/06、-1 @2025-09-06
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
-  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, MAX_ADD_ONCE));
+  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, 10));
   let dateStr = m[3] || '';
   if (dateStr) {
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
@@ -177,17 +195,13 @@ function buildChooseDateQuickReply(openEvts, tagText) {
     quickReply: {
       items: openEvts.slice(0, 12).map(e => ({
         type: 'action',
-        action: {
-          type: 'message',
-          label: mdDisp(e.date),
-          text: `${tagText} @${mdDisp(e.date)}`
-        }
+        action: { type: 'message', label: mdDisp(e.date), text: `${tagText} @${mdDisp(e.date)}` }
       }))
     }
   };
 }
 
-// ====== 顯示卡片（正取＋備取） ======
+// ====== 顯示卡片 ======
 function renderEventCard(e) {
   const d = new Date(`${e.date}T00:00:00+08:00`);
   const cur = totalCount(e.attendees);
@@ -197,7 +211,6 @@ function renderEventCard(e) {
   const waitLines = e.waitlist.length
     ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
     : [];
-
   let lines = [
     '✨ 週末羽球',
     `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
@@ -208,18 +221,13 @@ function renderEventCard(e) {
     ...mainLines,
   ];
   if (waitLines.length) {
-    lines = lines.concat([
-      '--------------------',
-      '🕒 備取名單：',
-      ...waitLines,
-    ]);
+    lines = lines.concat(['--------------------', '🕒 備取名單：', ...waitLines]);
   }
   return { type: 'text', text: lines.join('\n').slice(0, 4900) };
 }
 
 // ====== 正取/備取邏輯 ======
 function addPeople(evtObj, userId, name, n) {
-  // 已在正取 -> 直接疊加（若超上限，溢出到備取）
   let cur = totalCount(evtObj.attendees);
   const idx = findIndexById(evtObj.attendees, userId);
   if (idx !== -1) {
@@ -231,7 +239,6 @@ function addPeople(evtObj, userId, name, n) {
       cur += toMain;
     }
     if (n > 0) {
-      // 放到備取
       const w = findIndexById(evtObj.waitlist, userId);
       if (w !== -1) evtObj.waitlist[w].count += n;
       else evtObj.waitlist.push({ userId, name, count: n });
@@ -240,7 +247,6 @@ function addPeople(evtObj, userId, name, n) {
     return { status: 'main', addedMain: toMain, addedWait: 0 };
   }
 
-  // 還不在正取
   const canAdd = Math.max(0, evtObj.max - cur);
   const toMain = Math.min(n, canAdd);
   if (toMain > 0) {
@@ -260,15 +266,12 @@ function addPeople(evtObj, userId, name, n) {
 function removePeople(evtObj, userId, nAbs) {
   let toRemove = Math.abs(nAbs);
 
-  // 先在正取扣
   let idx = findIndexById(evtObj.attendees, userId);
   if (idx !== -1) {
     const m = evtObj.attendees[idx];
     if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
     else { toRemove -= m.count; evtObj.attendees.splice(idx, 1); }
   }
-
-  // 再到備取扣（如果自身也在備取）
   if (toRemove > 0) {
     let w = findIndexById(evtObj.waitlist, userId);
     if (w !== -1) {
@@ -277,8 +280,6 @@ function removePeople(evtObj, userId, nAbs) {
       else { toRemove -= m.count; evtObj.waitlist.splice(w, 1); }
     }
   }
-
-  // 正取有空缺 -> 從備取遞補（FIFO）
   let cur = totalCount(evtObj.attendees);
   while (cur < evtObj.max && evtObj.waitlist.length > 0) {
     const first = evtObj.waitlist[0];
@@ -306,12 +307,11 @@ async function handleEvent(evt) {
         text: '格式：/new 9/06 18:00-20:00 大安運動中心 羽10（可選 max=8）',
       });
     }
-    // 如果已過該日結束時間，不建立
     if (isExpiredEvent({ date: p.date, timeRange: p.timeRange })) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立～' });
     }
 
-    const db = loadDB();
+    const db = await loadDB();
     const id = 'evt_' + Date.now();
     db.events[id] = {
       id,
@@ -323,7 +323,16 @@ async function handleEvent(evt) {
       waitlist: [],
       createdAt: Date.now(),
     };
-    saveDB(db);
+    await saveDB(db);
+
+    // 背景寫 log
+    (async () => {
+      const who = await resolveDisplayName(evt);
+      logToSheet([
+        new Date().toISOString(), who, evt.source.userId || '',
+        'new', `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
+      ]);
+    })();
 
     const d = new Date(`${p.date}T00:00:00+08:00`);
     const msg = [
@@ -341,33 +350,20 @@ async function handleEvent(evt) {
       '輸入「list」查看報名狀況',
     ].join('\n');
 
-// 背景寫入：建立活動（保留這段即可）
-(async () => {
-  const who = await resolveDisplayName(evt);
-  logToSheet([
-    new Date().toISOString(),
-    who,
-    evt.source.userId || '',
-    'new',
-    `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
-  ]).catch(e => console.warn('logToSheet new failed:', e.message));
-})();
-
-// ✅ 單一回覆
-return client.replyMessage(evt.replyToken, [
-  { type: 'text', text: msg },
-  renderEventCard(db.events[id]),
-]);
+    return client.replyMessage(evt.replyToken, [
+      { type: 'text', text: msg },
+      renderEventCard(db.events[id]),
+    ]);
   }
 
   // list
   if (/^\/?list\b/i.test(text)) {
-    const db = loadDB();
+    const db = await loadDB();
     const openEvts = getOpenEvents(db);
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
     }
-    const msgs = openEvts.slice(0, MAX_MESSAGES_PER_LIST).map(renderEventCard);
+    const msgs = openEvts.slice(0, 5).map(renderEventCard);
     return client.replyMessage(evt.replyToken, msgs);
   }
 
@@ -375,7 +371,7 @@ return client.replyMessage(evt.replyToken, [
   const pm = parsePlusMinus(text);
   if (pm) {
     const { sign, n, dateStr } = pm;
-    const db = loadDB();
+    const db = await loadDB();
     const openEvts = getOpenEvents(db);
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
@@ -394,7 +390,6 @@ return client.replyMessage(evt.replyToken, [
       return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, tag));
     }
 
-    // 最後檢查是否仍開放
     if (isExpiredEvent(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作～' });
     }
@@ -403,56 +398,44 @@ return client.replyMessage(evt.replyToken, [
     const name = await resolveDisplayName(evt);
 
     if (sign > 0) {
-  const ret = addPeople(targetEvt, userId, name, n);
-  saveDB(db);
+      const ret = addPeople(targetEvt, userId, name, n);
+      await saveDB(db);
+      const cur = totalCount(targetEvt.attendees);
 
-  const cur = totalCount(targetEvt.attendees);   // 先算最新人數
+      logToSheet([
+        new Date().toISOString(), name, userId, 'add',
+        `+${n}@${targetEvt.date}`,
+        `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
+      ]);
 
-// 背景寫入：報名
-logToSheet([
-  new Date().toISOString(),
-  name,
-  userId,
-  'add',
-  `+${n}@${targetEvt.date}`,
-  `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
-]).catch(e => console.warn('logToSheet add failed:', e.message));
-      
-  let msg1 = '';
-  if (ret.status === 'main') {
-    msg1 = `✅ ${name} 報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
-  } else if (ret.status === 'wait') {
-    msg1 = `🕒 ${name} 進入備取 ${ret.addedWait} 人（正取已滿）`;
-  } else {
-    msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
-  }
-
-  return client.replyMessage(evt.replyToken, [
-    { type: 'text', text: msg1 },
-    renderEventCard(targetEvt),
-  ]);
-} else {
-      // 減人
+      let msg1 = '';
+      if (ret.status === 'main') {
+        msg1 = `✅ ${name} 報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
+      } else if (ret.status === 'wait') {
+        msg1 = `🕒 ${name} 進入備取 ${ret.addedWait} 人（正取已滿）`;
+      } else {
+        msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
+      }
+      return client.replyMessage(evt.replyToken, [
+        { type: 'text', text: msg1 },
+        renderEventCard(targetEvt),
+      ]);
+    } else {
       removePeople(targetEvt, userId, n);
-      saveDB(db);
-      
-const cur = totalCount(targetEvt.attendees); // 先算 cur 再寫入
-      
-// 背景寫入：取消
-logToSheet([
-  new Date().toISOString(),
-  name,
-  userId,
-  'remove',
-  `-${Math.abs(n)}@${targetEvt.date}`,
-  `cur=${cur}/${targetEvt.max}`
-]).catch(e => console.warn('logToSheet remove failed:', e.message));
+      await saveDB(db);
+      const cur = totalCount(targetEvt.attendees);
 
-const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
-return client.replyMessage(evt.replyToken, [
-  { type: 'text', text: msg1 },
-  renderEventCard(targetEvt),
-]);
+      logToSheet([
+        new Date().toISOString(), name, userId, 'remove',
+        `-${Math.abs(n)}@${targetEvt.date}`,
+        `cur=${cur}/${targetEvt.max}`
+      ]);
+
+      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
+      return client.replyMessage(evt.replyToken, [
+        { type: 'text', text: msg1 },
+        renderEventCard(targetEvt),
+      ]);
     }
   }
 
@@ -468,10 +451,7 @@ return client.replyMessage(evt.replyToken, [
         '• +3 @9/06（直接指定日期）',
     });
   }
-
-  return;
 }
 
 // ====== 啟動 ======
 app.listen(PORT, () => console.log('Server on', PORT));
-
