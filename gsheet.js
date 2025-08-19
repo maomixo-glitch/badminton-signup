@@ -3,17 +3,15 @@ const { google } = require("googleapis");
 async function appendRow(auth, values) {
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SHEET_ID,
-    range: "signup!A:E", // 這裡換成你表單實際名稱與範圍
+    spreadsheetId: process.env.SHEET_ID,   // ← 你在 Render 設的變數
+    range: "signup!A:E",                   // ← 你的表單分頁與欄位範圍
     valueInputOption: "RAW",
-    requestBody: {
-      values: [values],
-    },
+    requestBody: { values: [values] },
   });
   return res.data;
 }
 
-function getAuth() {
+function getAuthFromEnv() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   const auth = new google.auth.JWT(
     credentials.client_email,
@@ -24,4 +22,4 @@ function getAuth() {
   return auth;
 }
 
-module.exports = { appendRow, getAuth };
+module.exports = { appendRow, getAuthFromEnv };
