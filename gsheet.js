@@ -1,25 +1,46 @@
 const { google } = require("googleapis");
 
+function getAuth() {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  return new google.auth.JWT(
+    credentials.client_email,
+    null,
+    credentials.private_key,
+    ["https://www.googleapis.com/auth/spreadsheets"]
+  );
+}
+
 async function appendRow(auth, values) {
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SHEET_ID,   // ← 你在 Render 設的變數
-    range: "signup!A:E",                   // ← 你的表單分頁與欄位範圍
+    spreadsheetId: process.env.SHEET_ID,
+    range: "signup!A:E",
     valueInputOption: "RAW",
     requestBody: { values: [values] },
   });
   return res.data;
 }
 
-function getAuthFromEnv() {
-  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-  const auth = new google.auth.JWT(
-    credentials.client_email,
-    null,
-    credentials.private_key,
-    ["https://www.googleapis.com/auth/spreadsheets"]
-  );
-  return auth;
+// 讀 config!A1（整個 DB 的 JSON）
+async function readConfig(auth) {
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SHEET_ID,
+    range: "config!A1",
+  });
+  const txt = (res.data.values && res.data.values[0] && res.data.values[0][0]) || "";
+  return txt ? JSON.parse(txt) : {};
 }
 
-module.exports = { appendRow, getAuthFromEnv };
+// 寫回 config!A1
+async function writeConfig(auth, obj) {
+  const sheets = google.sheets({ version: "v4", auth });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SHEET_ID,
+    range: "config!A1",
+    valueInputOption: "RAW",
+    requestBody: { values: [[JSON.stringify(obj)]] },
+  });
+}
+
+module.exports = { getAuth, appendRow, readConfig, writeConfig };
