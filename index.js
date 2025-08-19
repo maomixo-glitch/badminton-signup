@@ -5,50 +5,17 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const line = require('@line/bot-sdk');
-const { getAuthFromEnv, appendRow } = require('./gsheet');
+const { getAuth, appendRow, readConfig, writeConfig } = require('./gsheet');
 
-// 懶初始化：第一筆要寫入時才去拿 auth；成功後緩存起來
+// 仍保留 appendRow 的 logToSheet（你已經使用）
 let SHEET_AUTH = null;
-async function logToSheet(values) {
-  try {
-    if (!SHEET_AUTH) SHEET_AUTH = await getAuthFromEnv();
-    await appendRow(SHEET_AUTH, values);
-  } catch (e) {
-    console.warn('logToSheet failed:', e.message);
-  }
+async function getSheetAuth() {
+  if (!SHEET_AUTH) SHEET_AUTH = getAuth();
+  return SHEET_AUTH;
 }
 
-// ====== 環境變數 ======
-const {
-  CHANNEL_ACCESS_TOKEN,
-  CHANNEL_SECRET,
-  PORT = 3000,
-  // 若有 Persistent Disk，建議設 DB_FILE=/data/badminton-db.json
-  DB_FILE = path.join(__dirname, 'data.json'),
-} = process.env;
-
-// ====== 常數 ======
-const DEFAULT_MAX = 8;        // 正取上限（你指定 8）
-const MAX_ADD_ONCE = 10;      // 單次最多加/減人數
-const MAX_MESSAGES_PER_LIST = 5; // list 一次最多回 5 則卡片
-
-// ====== LINE SDK / Express ======
-const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNEL_SECRET };
-const client = new line.Client(config);
-const app = express();
-
-app.get('/healthz', (_, res) => res.send('ok'));
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  // 先回 200，避免 LINE 等太久（冷啟動／IO 造成超時）
-  res.status(200).end();
-
-  // 背景處理
-  for (const e of req.body.events) {
-    handleEvent(e).catch(err => console.error('handleEvent error:', err));
-  }
-});
-
-// ====== DB 讀寫 ======
+// DB in memory + Google Sheet 持久化
+const DEFAULT_MAX = 8; // 你原本的
 function ensureDBShape(db) {
   if (!db) db = {};
   if (!db.config) db.config = { defaultMax: DEFAULT_MAX };
@@ -56,16 +23,21 @@ function ensureDBShape(db) {
   if (!db.names) db.names = {};   // userId -> displayName
   return db;
 }
-function loadDB() {
-  try {
-    const s = fs.readFileSync(DB_FILE, 'utf-8');
-    return ensureDBShape(JSON.parse(s));
-  } catch {
-    return ensureDBShape({});
-  }
+
+let MEM_DB = null; // 記憶體快取，減少每次打 Sheet
+
+async function loadDB() {
+  if (MEM_DB) return MEM_DB;
+  const auth = await getSheetAuth();
+  const fromSheet = await readConfig(auth).catch(() => ({}));
+  MEM_DB = ensureDBShape(fromSheet);
+  return MEM_DB;
 }
-function saveDB(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+
+async function saveDB(db) {
+  MEM_DB = ensureDBShape(db);
+  const auth = await getSheetAuth();
+  await writeConfig(auth, MEM_DB);
 }
 
 // ====== 小工具 ======
