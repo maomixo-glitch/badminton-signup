@@ -155,7 +155,7 @@ function renderEventCard(e) {
     ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
     : [];
   let lines = [
-    '✨ 週末羽球',
+    '✨ 羽球報名',
     `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
     `⏰ ${e.timeRange}`,
     `📍 ${e.location}`,
@@ -393,7 +393,7 @@ async function handleEvent(evt) {
 
     const d = new Date(`${p.date}T00:00:00+08:00`);
     const msg = [
-      '📌 週末羽球報名開始！',
+      '📌 羽球報名開始！',
       `📅 ${mdDisp(p.date)}(${weekdayZh(d)})`,
       `⏰ ${p.timeRange}`,
       `📍 ${p.location}`,
@@ -405,6 +405,7 @@ async function handleEvent(evt) {
       '• -1：自己取消',
       '',
       '輸入「list」查看報名狀況',
+      '輸入「delet」刪除場次',
     ].join('\n');
 
     return client.replyMessage(evt.replyToken, [
@@ -605,7 +606,11 @@ async function reminderTick() {
 
       // 開打前 REMIND_BEFORE_MIN ~ 1 分鐘之間，推一次提醒
       if (mins <= REMIND_BEFORE_MIN && mins > 0) {
-        const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）再 ${mins} 分鐘開始！`;
+        let minsText = `${mins} 分鐘`;
+      if (mins === 60) minsText = '1小時';
+
+      const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）再 ${minsText}後開始！`;
+
         const messages = [
           { type: 'text', text: title },
           renderEventCard(e), // 附目前名單
@@ -622,12 +627,12 @@ async function reminderTick() {
 
         // 寫一筆 log（非阻塞）
         logToSheet([
-          new Date().toISOString(),
-          '(system)',
-          e.to,
-          'remind',
-          `${e.date} ${e.timeRange} ${e.location} - ${mins}min before`
-        ]).catch(() => {});
+  new Date().toISOString(),
+  '(system)',
+  e.to,
+  'remind',
+  `${e.date} ${e.timeRange} ${e.location} - ${mins === 60 ? '1小時前' : mins + '分鐘前'}`
+]).catch(() => {});
       }
     }
   } catch (err) {
