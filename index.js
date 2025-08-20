@@ -98,6 +98,20 @@ function getOpenEvents(db) {
 const totalCount = (list) => list.reduce((a, m) => a + (m.count || 0), 0);
 const findIndexById = (list, id) => list.findIndex(m => m.userId === id);
 
+// 取得某場次的「開始時間」Date 物件（+08:00）
+function startDateObj(e) {
+  const t = parseTimeRange(e.timeRange);
+  if (!t) return new Date(`${e.date}T00:00:00+08:00`);
+  const hh = String(t.sh).padStart(2, '0');
+  const mm = String(t.sm).padStart(2, '0');
+  return new Date(`${e.date}T${hh}:${mm}:00+08:00`);
+}
+
+// 距離開始還有幾分鐘（過了會是負值）
+function minutesToStart(e) {
+  return Math.round((startDateObj(e) - new Date()) / 60000);
+}
+
 // Quick Reply：選日期（+ / - 時用）
 function buildChooseDateQuickReply(openEvts, tagText) {
   return {
@@ -268,6 +282,9 @@ async function resolveDisplayName(evt) {
 
 // ====== /new 解析 ======
 function parseNewPayload(text) {
+  // 支援：
+  // /new 9/06 18:00-20:00 大安運動中心 羽10 [max=8]
+  // /new 2025-09-06 18:00-20:00 大安運動中心 羽10
   const s = text.replace(/^\/new\s*/i, '').trim();
   const parts = s.split(/\s+/).filter(Boolean);
   if (parts.length < 3) return null;
@@ -277,11 +294,14 @@ function parseNewPayload(text) {
 
   let tail = parts.slice(2);
   let max = DEFAULT_MAX;
+
+  // 尾段可能有 max=8
   const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
   if (mMax) {
     max = Math.max(1, parseInt(mMax[1], 10));
     tail = tail.slice(0, -1);
   }
+
   let location = '';
   let court = '';
   if (tail.length >= 2) {
@@ -292,12 +312,17 @@ function parseNewPayload(text) {
   }
 
   let ymd = '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) ymd = dateRaw;
-  else if (/^\d{1,2}\/\d{1,2}$/.test(dateRaw)) ymd = toYYYYMMDDFromMD(dateRaw);
-  else return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
+    ymd = dateRaw;
+  } else if (/^\d{1,2}\/\d{1,2}$/.test(dateRaw)) {
+    ymd = toYYYYMMDDFromMD(dateRaw);
+  } else {
+    return null;
+  }
 
   if (!parseTimeRange(timeRange)) return null;
 
+  // 如果場地尾碼有數字（如「羽10」），用它覆蓋人數上限
   const cNum = court.match(/(\d+)/);
   if (cNum) max = Math.max(1, parseInt(cNum[1], 10));
 
@@ -306,6 +331,7 @@ function parseNewPayload(text) {
 
 // ====== +N / -N 解析 ======
 function parsePlusMinus(text) {
+  // 支援：+3、-1、+2 @9/06、-1 @2025-09-06
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
@@ -338,16 +364,22 @@ async function handleEvent(evt) {
 
     const db = await loadDB();
     const id = 'evt_' + Date.now();
+    const to = evt.source.groupId || evt.source.roomId || evt.source.userId;
     db.events[id] = {
-      id,
-      date: p.date,
-      timeRange: p.timeRange,
-      location: p.location,
-      max: p.max || DEFAULT_MAX,
-      attendees: [],
-      waitlist: [],
-      createdAt: Date.now(),
-    };
+  id,
+  date: p.date,
+  timeRange: p.timeRange,
+  location: p.location,
+  max: p.max || DEFAULT_MAX,
+  attendees: [],
+  waitlist: [],
+  createdAt: Date.now(),
+
+  // 新增這兩個
+  to,              // 之後 pushMessage 會用這個對話 ID 來推提醒
+  reminded: false, // 還沒提醒過
+  // remindedAt: undefined
+};
     await saveDB(db);
 
     // 背景寫 log
@@ -555,6 +587,56 @@ async function handleEvent(evt) {
 
   return;
 }
+
+const REMIND_BEFORE_MIN = 60; // 開打前幾分鐘提醒（你要 60 分）
+
+async function reminderTick() {
+  try {
+    const db = await loadDB();
+    const events = Object.values(db.events || []);
+    if (!events.length) return;
+
+    for (const e of events) {
+      if (!e || e.reminded) continue;      // 已提醒過就跳過
+      if (!e.to) continue;                  // 舊資料可能沒有 to
+      if (isExpiredEvent(e)) continue;      // 已過結束時間
+
+      const mins = minutesToStart(e);
+
+      // 開打前 REMIND_BEFORE_MIN ~ 1 分鐘之間，推一次提醒
+      if (mins <= REMIND_BEFORE_MIN && mins > 0) {
+        const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）再 ${mins} 分鐘開始！`;
+        const messages = [
+          { type: 'text', text: title },
+          renderEventCard(e), // 附目前名單
+        ];
+
+        await client.pushMessage(e.to, messages).catch(err => {
+          console.warn('push reminder failed:', err.message);
+        });
+
+        // 標記已提醒
+        e.reminded = true;
+        e.remindedAt = Date.now();
+        await saveDB(db);
+
+        // 寫一筆 log（非阻塞）
+        logToSheet([
+          new Date().toISOString(),
+          '(system)',
+          e.to,
+          'remind',
+          `${e.date} ${e.timeRange} ${e.location} - ${mins}min before`
+        ]).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.warn('reminderTick error:', err.message);
+  }
+}
+
+// 每 60 秒掃一次（你已用 UptimeRobot 叫醒 Render，就會持續運作）
+setInterval(reminderTick, 60 * 1000);
 
 // ====== 啟動 ======
 app.listen(PORT, () => console.log('Server on', PORT));
