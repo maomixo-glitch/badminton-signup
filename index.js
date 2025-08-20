@@ -14,7 +14,7 @@ async function getSheetAuth() {
   return SHEET_AUTH;
 }
 
-// ====== 將操作寫入 signup 分頁（非同步 fire-and-forget） ======
+// ====== 寫入 signup 分頁（非同步 fire-and-forget） ======
 async function logToSheet(values) {
   try {
     const auth = await getSheetAuth();
@@ -25,9 +25,7 @@ async function logToSheet(values) {
 }
 
 // ====== DB in memory + Google Sheet 持久化 ======
-const DEFAULT_MAX = 8;              // 預設正取上限
-const MAX_ADD_ONCE = 10;            // 單次最多 +/-
-const MAX_MESSAGES_PER_LIST = 5;    // list 最多回幾張卡
+const DEFAULT_MAX = 8;
 
 function ensureDBShape(db) {
   if (!db) db = {};
@@ -37,7 +35,7 @@ function ensureDBShape(db) {
   return db;
 }
 
-let MEM_DB = null; // 記憶體快取，降低對 Sheet 的讀取次數
+let MEM_DB = null; // 記憶體快取
 
 async function loadDB() {
   if (MEM_DB) return MEM_DB;
@@ -54,7 +52,7 @@ async function saveDB(db) {
 }
 
 // ====== 小工具 ======
-const SIGNUP_DEADLINE_MINUTES = 60; // 開始後 60 分鐘截止報名
+const SIGNUP_DEADLINE_MINUTES = 60; // 開始後 60 分鐘停止「報名 +」
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const weekdayZh = (d) => ['日','一','二','三','四','五','六'][d.getDay()];
@@ -90,8 +88,7 @@ function isExpiredEvent(e) {
 function isSignupClosed(e) {
   const start = new Date(`${e.date}T${e.timeRange.split('-')[0]}:00+08:00`);
   const deadline = new Date(start.getTime() + SIGNUP_DEADLINE_MINUTES * 60000);
-  // 介於「開打後 N 分」與「結束前」都算報名截止
-  return new Date() >= deadline && new Date() < endDateObj(e.date, e.timeRange);
+  return new Date() >= deadline;
 }
 function getOpenEvents(db) {
   return Object.values(db.events)
@@ -101,15 +98,139 @@ function getOpenEvents(db) {
 const totalCount = (list) => list.reduce((a, m) => a + (m.count || 0), 0);
 const findIndexById = (list, id) => list.findIndex(m => m.userId === id);
 
+// Quick Reply：選日期（+ / - 時用）
+function buildChooseDateQuickReply(openEvts, tagText) {
+  return {
+    type: 'text',
+    text: '你想套用在哪一天？',
+    quickReply: {
+      items: openEvts.slice(0, 12).map(e => ({
+        type: 'action',
+        action: { type: 'message', label: mdDisp(e.date), text: `${tagText} @${mdDisp(e.date)}` }
+      }))
+    }
+  };
+}
+
+// Quick Reply：刪除場次選日期
+function buildDeleteChooseQuickReply(openEvts) {
+  return {
+    type: 'text',
+    text: '要刪除哪一天？',
+    quickReply: {
+      items: openEvts.slice(0, 12).map(e => ({
+        type: 'action',
+        action: {
+          type: 'message',
+          label: mdDisp(e.date),
+          text: `刪除 @${mdDisp(e.date)}`
+        }
+      }))
+    }
+  };
+}
+
+// 卡片
+function renderEventCard(e) {
+  const d = new Date(`${e.date}T00:00:00+08:00`);
+  const cur = totalCount(e.attendees);
+  const mainLines = e.attendees.length
+    ? e.attendees.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
+    : ['(目前還沒有人報名～)'];
+  const waitLines = e.waitlist.length
+    ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
+    : [];
+  let lines = [
+    '✨ 週末羽球',
+    `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
+    `⏰ ${e.timeRange}`,
+    `📍 ${e.location}`,
+    '====================',
+    `✅ 正式名單 (${cur}/${e.max}人)：`,
+    ...mainLines,
+  ];
+  if (waitLines.length) {
+    lines = lines.concat(['--------------------', '🕒 備取名單：', ...waitLines]);
+  }
+  return { type: 'text', text: lines.join('\n').slice(0, 4900) };
+}
+
+// ====== 正取/備取邏輯 ======
+function addPeople(evtObj, userId, name, n) {
+  let cur = totalCount(evtObj.attendees);
+  const idx = findIndexById(evtObj.attendees, userId);
+  if (idx !== -1) {
+    const canAdd = Math.max(0, evtObj.max - cur);
+    const toMain = Math.min(n, canAdd);
+    if (toMain > 0) {
+      evtObj.attendees[idx].count += toMain;
+      n -= toMain;
+      cur += toMain;
+    }
+    if (n > 0) {
+      const w = findIndexById(evtObj.waitlist, userId);
+      if (w !== -1) evtObj.waitlist[w].count += n;
+      else evtObj.waitlist.push({ userId, name, count: n });
+      return { status: 'wait', addedMain: toMain, addedWait: n };
+    }
+    return { status: 'main', addedMain: toMain, addedWait: 0 };
+  }
+
+  const canAdd = Math.max(0, evtObj.max - cur);
+  const toMain = Math.min(n, canAdd);
+  if (toMain > 0) {
+    evtObj.attendees.push({ userId, name, count: toMain });
+    n -= toMain;
+    cur += toMain;
+  }
+  if (n > 0) {
+    const w = findIndexById(evtObj.waitlist, userId);
+    if (w !== -1) evtObj.waitlist[w].count += n;
+    else evtObj.waitlist.push({ userId, name, count: n });
+    return { status: toMain > 0 ? 'mixed' : 'wait', addedMain: toMain, addedWait: n };
+  }
+  return { status: 'main', addedMain: toMain, addedWait: 0 };
+}
+
+function removePeople(evtObj, userId, nAbs) {
+  let toRemove = Math.abs(nAbs);
+  let idx = findIndexById(evtObj.attendees, userId);
+  if (idx !== -1) {
+    const m = evtObj.attendees[idx];
+    if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
+    else { toRemove -= m.count; evtObj.attendees.splice(idx, 1); }
+  }
+  if (toRemove > 0) {
+    let w = findIndexById(evtObj.waitlist, userId);
+    if (w !== -1) {
+      const m = evtObj.waitlist[w];
+      if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
+      else { toRemove -= m.count; evtObj.waitlist.splice(w, 1); }
+    }
+  }
+  let cur = totalCount(evtObj.attendees);
+  while (cur < evtObj.max && evtObj.waitlist.length > 0) {
+    const first = evtObj.waitlist[0];
+    const canTake = Math.min(first.count, evtObj.max - cur);
+    const i = findIndexById(evtObj.attendees, first.userId);
+    if (i === -1) evtObj.attendees.push({ userId: first.userId, name: first.name, count: canTake });
+    else evtObj.attendees[i].count += canTake;
+    first.count -= canTake;
+    cur += canTake;
+    if (first.count <= 0) evtObj.waitlist.shift();
+  }
+}
+
 // ====== LINE / Express ======
 const { CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, PORT = 10000 } = process.env;
 const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNEL_SECRET };
 const client = new line.Client(config);
 const app = express();
 
-app.get('/healthz', (_req, res) => res.status(200).send('OK'));
+// for UptimeRobot
+app.get('/healthz', (req, res) => res.status(200).send('OK'));
 
-// 先回 200，再背景處理，避免冷啟時 webhook 超時
+// 先回 200 再背景處理，避免冷啟 webhook 超時
 app.post('/webhook', line.middleware(config), async (req, res) => {
   res.status(200).end();
   for (const e of req.body.events) {
@@ -188,7 +309,7 @@ function parsePlusMinus(text) {
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
-  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, MAX_ADD_ONCE));
+  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, 10));
   let dateStr = m[3] || '';
   if (dateStr) {
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
@@ -197,129 +318,12 @@ function parsePlusMinus(text) {
   return { sign, n, dateStr };
 }
 
-// ====== Quick Reply (選日期) ======
-function buildChooseDateQuickReply(openEvts, tagText) {
-  return {
-    type: 'text',
-    text: '你想套用在哪一天？',
-    quickReply: {
-      items: openEvts.slice(0, 12).map(e => ({
-        type: 'action',
-        action: { type: 'message', label: mdDisp(e.date), text: `${tagText} @${mdDisp(e.date)}` }
-      }))
-    }
-  };
-}
-
-// ====== 顯示卡片 ======
-function renderEventCard(e) {
-  const d = new Date(`${e.date}T00:00:00+08:00`);
-  const cur = totalCount(e.attendees);
-  const mainLines = e.attendees.length
-    ? e.attendees.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
-    : ['(目前還沒有人報名～)'];
-  const waitLines = e.waitlist.length
-    ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
-    : [];
-  let lines = [
-    '✨ 週末羽球',
-    `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
-    `⏰ ${e.timeRange}`,
-    `📍 ${e.location}`,
-    '====================',
-    `✅ 正式名單 (${cur}/${e.max}人)：`,
-    ...mainLines,
-  ];
-  if (waitLines.length) {
-    lines = lines.concat(['--------------------', '🕒 備取名單：', ...waitLines]);
-  }
-  return { type: 'text', text: lines.join('\n').slice(0, 4900) };
-}
-
-// ====== 刪除場次：格式化確認訊息 ======
-function renderDeletedMsg(e) {
-  const d = new Date(`${e.date}T00:00:00+08:00`);
-  return [
-    '🗑 已刪除場次：',
-    `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
-    `⏰ ${e.timeRange}`,
-    `📍 ${e.location}`
-  ].join('\n');
-}
-
-// ====== 正取/備取邏輯 ======
-function addPeople(evtObj, userId, name, n) {
-  let cur = totalCount(evtObj.attendees);
-  const idx = findIndexById(evtObj.attendees, userId);
-  if (idx !== -1) {
-    const canAdd = Math.max(0, evtObj.max - cur);
-    const toMain = Math.min(n, canAdd);
-    if (toMain > 0) {
-      evtObj.attendees[idx].count += toMain;
-      n -= toMain;
-      cur += toMain;
-    }
-    if (n > 0) {
-      const w = findIndexById(evtObj.waitlist, userId);
-      if (w !== -1) evtObj.waitlist[w].count += n;
-      else evtObj.waitlist.push({ userId, name, count: n });
-      return { status: 'wait', addedMain: toMain, addedWait: n };
-    }
-    return { status: 'main', addedMain: toMain, addedWait: 0 };
-  }
-
-  const canAdd = Math.max(0, evtObj.max - cur);
-  const toMain = Math.min(n, canAdd);
-  if (toMain > 0) {
-    evtObj.attendees.push({ userId, name, count: toMain });
-    n -= toMain;
-    cur += toMain;
-  }
-  if (n > 0) {
-    const w = findIndexById(evtObj.waitlist, userId);
-    if (w !== -1) evtObj.waitlist[w].count += n;
-    else evtObj.waitlist.push({ userId, name, count: n });
-    return { status: toMain > 0 ? 'mixed' : 'wait', addedMain: toMain, addedWait: n };
-  }
-  return { status: 'main', addedMain: toMain, addedWait: 0 };
-}
-
-function removePeople(evtObj, userId, nAbs) {
-  let toRemove = Math.abs(nAbs);
-
-  let idx = findIndexById(evtObj.attendees, userId);
-  if (idx !== -1) {
-    const m = evtObj.attendees[idx];
-    if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
-    else { toRemove -= m.count; evtObj.attendees.splice(idx, 1); }
-  }
-  if (toRemove > 0) {
-    let w = findIndexById(evtObj.waitlist, userId);
-    if (w !== -1) {
-      const m = evtObj.waitlist[w];
-      if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
-      else { toRemove -= m.count; evtObj.waitlist.splice(w, 1); }
-    }
-  }
-  let cur = totalCount(evtObj.attendees);
-  while (cur < evtObj.max && evtObj.waitlist.length > 0) {
-    const first = evtObj.waitlist[0];
-    const canTake = Math.min(first.count, evtObj.max - cur);
-    const i = findIndexById(evtObj.attendees, first.userId);
-    if (i === -1) evtObj.attendees.push({ userId: first.userId, name: first.name, count: canTake });
-    else evtObj.attendees[i].count += canTake;
-    first.count -= canTake;
-    cur += canTake;
-    if (first.count <= 0) evtObj.waitlist.shift();
-  }
-}
-
 // ====== 指令處理 ======
 async function handleEvent(evt) {
   if (evt.type !== 'message' || evt.message.type !== 'text') return;
   const text = (evt.message.text || '').trim();
 
-  // /new
+  // ---------- 建立新場次 ----------
   if (/^\/new\b/i.test(text)) {
     const p = parseNewPayload(text);
     if (!p) {
@@ -377,88 +381,88 @@ async function handleEvent(evt) {
     ]);
   }
 
-  // list
+  // ---------- 列出場次 ----------
   if (/^\/?list\b/i.test(text)) {
     const db = await loadDB();
     const openEvts = getOpenEvents(db);
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
     }
-    const msgs = openEvts.slice(0, MAX_MESSAGES_PER_LIST).map(renderEventCard);
+    const msgs = openEvts.slice(0, 5).map(renderEventCard);
     return client.replyMessage(evt.replyToken, msgs);
   }
 
-  // ====== 刪除場次 ======
-  if (/^(刪除場次|\/?del)\b/i.test(text)) {
+  // ---------- 刪除場次（關鍵字：刪除場次 / delet） ----------
+  if (/^(?:\/?刪除場次|delet)\b/i.test(text)) {
     const db = await loadDB();
     const openEvts = getOpenEvents(db);
 
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, {
         type: 'text',
-        text: '目前沒有可刪除的開放中場次唷～'
+        text: '目前沒有開放中的場次可刪除～'
       });
     }
 
-    // 支援「刪除場次 @9/06」或「刪除場次 @2025-09-06」
-    const m = text.match(/@([0-9\/\-]+)/);
-    if (m) {
-      let dateStr = m[1];
-      if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-        return client.replyMessage(evt.replyToken, { type: 'text', text: '日期格式錯誤，請用 9/06 或 2025-09-06' });
-      }
-      const target = openEvts.find(e => e.date === dateStr);
-      if (!target) {
-        return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期或已過期～' });
-      }
-
-      delete db.events[target.id];
-      await saveDB(db);
-
-      (async () => {
-        try {
-          const who = await resolveDisplayName(evt);
-          logToSheet([
-            new Date().toISOString(),
-            who,
-            evt.source.userId || '',
-            'delete',
-            `${target.date} ${target.timeRange} ${target.location}`
-          ]);
-        } catch {}
-      })();
-
-      return client.replyMessage(evt.replyToken, { type: 'text', text: renderDeletedMsg(target) });
-    }
-
-    // 沒帶日期：只有一場就直接刪，多場就跳 Quick Reply
+    // 只有一場 -> 直接刪
     if (openEvts.length === 1) {
-      const target = openEvts[0];
-      delete db.events[target.id];
+      const e = openEvts[0];
+      delete db.events[e.id];
       await saveDB(db);
 
-      (async () => {
-        try {
-          const who = await resolveDisplayName(evt);
-          logToSheet([
-            new Date().toISOString(),
-            who,
-            evt.source.userId || '',
-            'delete',
-            `${target.date} ${target.timeRange} ${target.location}`
-          ]);
-        } catch {}
-      })();
+      logToSheet([
+        new Date().toISOString(),
+        await resolveDisplayName(evt),
+        evt.source.userId || '',
+        'delete',
+        `${e.date} ${e.timeRange} ${e.location}`
+      ]).catch(() => {});
 
-      return client.replyMessage(evt.replyToken, { type: 'text', text: renderDeletedMsg(target) });
-    } else {
-      // 多場：跳出日期按鈕；點了會送「刪除場次 @MM/DD」
-      return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, '刪除場次'));
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: `已刪除：${mdDisp(e.date)} ${e.timeRange}／${e.location}`
+      });
     }
+
+    // 多場 -> 跳選單
+    return client.replyMessage(evt.replyToken, buildDeleteChooseQuickReply(openEvts));
   }
 
-  // ====== +N / -N ======
+  // ---------- 刪除 @日期 ----------
+  const delMatch = text.match(/^刪除\s*@\s*([0-9\/\-]+)$/i);
+  if (delMatch) {
+    let dateStr = delMatch[1];
+    if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
+
+    const db = await loadDB();
+    const openEvts = getOpenEvents(db);
+    const target = openEvts.find(e => e.date === dateStr);
+
+    if (!target) {
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: '找不到該日期的開放場次～'
+      });
+    }
+
+    delete db.events[target.id];
+    await saveDB(db);
+
+    logToSheet([
+      new Date().toISOString(),
+      await resolveDisplayName(evt),
+      evt.source.userId || '',
+      'delete',
+      `${target.date} ${target.timeRange} ${target.location}`
+    ]).catch(() => {});
+
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text: `已刪除：${mdDisp(target.date)} ${target.timeRange}／${target.location}`
+    });
+  }
+
+  // ---------- +N / -N ----------
   const pm = parsePlusMinus(text);
   if (pm) {
     const { sign, n, dateStr } = pm;
@@ -482,7 +486,7 @@ async function handleEvent(evt) {
       return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, tag));
     }
 
-    // 到結束時間就一律不允許
+    // 已完全結束 -> 一律不允許
     if (isExpiredEvent(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作～' });
     }
@@ -509,7 +513,7 @@ async function handleEvent(evt) {
         'add',
         `+${n}@${targetEvt.date}`,
         `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
-      ]).catch(e => console.warn('logToSheet add failed:', e.message));
+      ]).catch(() => {});
 
       let msg1 = '';
       if (ret.status === 'main') {
@@ -539,7 +543,7 @@ async function handleEvent(evt) {
         'remove',
         `-${Math.abs(n)}@${targetEvt.date}`,
         `cur=${cur}/${targetEvt.max}`
-      ]).catch(e => console.warn('logToSheet remove failed:', e.message));
+      ]).catch(() => {});
 
       const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, [
@@ -549,18 +553,7 @@ async function handleEvent(evt) {
     }
   }
 
-  // /help
-  if (/^\/?help\b/i.test(text)) {
-    return client.replyMessage(evt.replyToken, {
-      type: 'text',
-      text:
-        '指令：\n' +
-        '• /new 9/06 18:00-20:00 大安運動中心 羽10（可選 max=8）\n' +
-        '• list（列出所有開放中場次）\n' +
-        '• +1 / +2 / -1（若多場會跳出日期選擇；也可 +3 @9/06）\n' +
-        '• 刪除場次（單場直接刪；多場會跳選擇；也可 刪除場次 @9/06）',
-    });
-  }
+  return;
 }
 
 // ====== 啟動 ======
