@@ -400,7 +400,7 @@ async function handleEvent(evt) {
       '• -1：自己取消',
       '',
       '輸入「list」查看報名狀況',
-      '輸入「delet」刪除場次',
+      '輸入「delete」刪除場次',
     ].join('\n');
 
     return client.replyMessage(evt.replyToken, [
@@ -421,8 +421,8 @@ async function handleEvent(evt) {
     return client.replyMessage(evt.replyToken, msgs);
   }
 
-  // ---------- 刪除場次（刪除場次 / delet） ----------
-  if (/^(?:\/?刪除場次|delet)\b/i.test(text)) {
+  // ---------- 刪除場次（刪除場次 / delete） ----------
+  if (/^(?:\/?刪除場次|delete)\b/i.test(text)) {
     const db = await loadDB();
     const to = getToFromEvent(evt);
     const sourceType = evt.source?.type || '';
