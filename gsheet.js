@@ -14,7 +14,7 @@ async function appendRow(auth, values) {
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.SHEET_ID,
-    range: "signup!A:E",
+    range: "signup!A:Z",
     valueInputOption: "RAW",
     requestBody: { values: [values] },
   });
