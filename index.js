@@ -12,19 +12,50 @@ async function getSheetAuth() {
   return SHEET_AUTH;
 }
 
-// ====== 寫入 signup 分頁（非同步 fire-and-forget，統一 7 欄） ======
-async function logToSheet(values) {
+// ====== 依新版欄位(A:J)寫入 signup 分頁 ======
+/**
+ * row schema: [
+ *   timestamp, name, user_id, sourceType, to, action, detail, event_date, event_time, location
+ * ]
+ */
+async function logToSheetRow(row) {
   try {
     const auth = await getSheetAuth();
-    await appendRow(auth, values);
+    await appendRow(auth, row); // 你的 gsheet.js 會把它 append 到 signup!A:J
   } catch (e) {
     console.warn('logToSheet failed:', e.message);
   }
 }
 
+// 方便呼叫：用物件組合 row 後寫入
+async function logToSheet({
+  name = '',
+  userId = '',
+  sourceType = '',
+  to = '',
+  action = '',
+  detail = '',
+  eventDate = '',
+  eventTime = '',
+  location = '',
+}) {
+  const row = [
+    new Date().toISOString(),
+    name,
+    userId,
+    sourceType,
+    to,
+    action,
+    detail,
+    eventDate,
+    eventTime,
+    location,
+  ];
+  await logToSheetRow(row);
+}
+
 // ====== DB in memory + Google Sheet 持久化 ======
 const DEFAULT_MAX = 8;
-const MAX_ADD_ONCE = 10;
 
 function ensureDBShape(db) {
   if (!db) db = {};
@@ -95,14 +126,14 @@ function getToFromEvent(evt) {
 }
 function getOpenEvents(db, to) {
   return Object.values(db.events)
-    .filter(e => e.to === to)
-    .filter(e => !isExpiredEvent(e))
+    .filter(e => e.to === to)        // 只顯示同一對話的
+    .filter(e => !isExpiredEvent(e)) // 未過期
     .sort((a, b) => (a.date + a.timeRange).localeCompare(b.date + b.timeRange));
 }
 const totalCount = (list) => list.reduce((a, m) => a + (m.count || 0), 0);
 const findIndexById = (list, id) => list.findIndex(m => m.userId === id);
 
-// 取得開始時間（+08:00）
+// 取得「開始時間」Date（+08:00）
 function startDateObj(e) {
   const t = parseTimeRange(e.timeRange);
   if (!t) return new Date(`${e.date}T00:00:00+08:00`);
@@ -110,13 +141,12 @@ function startDateObj(e) {
   const mm = String(t.sm).padStart(2, '0');
   return new Date(`${e.date}T${hh}:${mm}:00+08:00`);
 }
-
-// 距離開始還有幾分鐘（過了會是負值）
+// 距離開始還有幾分鐘（負值代表已開始）
 function minutesToStart(e) {
   return Math.round((startDateObj(e) - new Date()) / 60000);
 }
 
-// Quick Reply：選日期（+ / -）
+// Quick Reply：+ / - 選日期
 function buildChooseDateQuickReply(openEvts, tagText) {
   return {
     type: 'text',
@@ -129,7 +159,6 @@ function buildChooseDateQuickReply(openEvts, tagText) {
     }
   };
 }
-
 // Quick Reply：刪除場次選日期
 function buildDeleteChooseQuickReply(openEvts) {
   return {
@@ -205,7 +234,6 @@ function addPeople(evtObj, userId, name, n) {
   }
   return { status: 'main', addedMain: toMain, addedWait: 0 };
 }
-
 function removePeople(evtObj, userId, nAbs) {
   let toRemove = Math.abs(nAbs);
   let idx = findIndexById(evtObj.attendees, userId);
@@ -242,9 +270,9 @@ const client = new line.Client(config);
 const app = express();
 
 // for UptimeRobot
-app.get('/healthz', (_, res) => res.status(200).send('OK'));
+app.get('/healthz', (req, res) => res.status(200).send('OK'));
 
-// 先回 200，避免冷啟 webhook 超時
+// 先回 200 再背景處理，避免冷啟 webhook 超時
 app.post('/webhook', line.middleware(config), async (req, res) => {
   res.status(200).end();
   for (const e of req.body.events) {
@@ -294,7 +322,7 @@ function parseNewPayload(text) {
   let tail = parts.slice(2);
   let max = DEFAULT_MAX;
 
-  // 尾段可能有 max=8
+  // 末尾可能有 max=8
   const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
   if (mMax) {
     max = Math.max(1, parseInt(mMax[1], 10));
@@ -330,7 +358,7 @@ function parsePlusMinus(text) {
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
-  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, MAX_ADD_ONCE));
+  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, 10));
   let dateStr = m[3] || '';
   if (dateStr) {
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
@@ -344,11 +372,17 @@ async function handleEvent(evt) {
   if (evt.type !== 'message' || evt.message.type !== 'text') return;
   const text = (evt.message.text || '').trim();
 
+  const to = getToFromEvent(evt);
+  const sourceType = evt.source?.type || 'user';
+
   // ---------- 建立新場次 ----------
   if (/^\/new\b/i.test(text)) {
     const p = parseNewPayload(text);
     if (!p) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '格式：/new 9/06 18:00-20:00 大安運動中心 羽10（可選 max=8）' });
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: '格式：/new 9/06 18:00-20:00 大安運動中心 羽10（可選 max=8）',
+      });
     }
     if (isExpiredEvent({ date: p.date, timeRange: p.timeRange })) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立～' });
@@ -356,7 +390,6 @@ async function handleEvent(evt) {
 
     const db = await loadDB();
     const id = 'evt_' + Date.now();
-    const to = getToFromEvent(evt);
     db.events[id] = {
       id,
       date: p.date,
@@ -371,19 +404,20 @@ async function handleEvent(evt) {
     };
     await saveDB(db);
 
-    // 背景寫 log（7 欄）
+    // 背景 log
     (async () => {
       const who = await resolveDisplayName(evt);
-      const sourceType = evt.source?.type || '';
-      logToSheet([
-        new Date().toISOString(),
-        who,
-        evt.source.userId || '',
+      await logToSheet({
+        name: who,
+        userId: evt.source.userId || '',
         sourceType,
         to,
-        'new',
-        `${p.date} ${p.timeRange} ${p.location} max=${p.max || DEFAULT_MAX}`
-      ]);
+        action: 'create_event',
+        detail: `建立場次 max=${p.max || DEFAULT_MAX}`,
+        eventDate: p.date,
+        eventTime: p.timeRange,
+        location: p.location,
+      });
     })();
 
     const d = new Date(`${p.date}T00:00:00+08:00`);
@@ -400,7 +434,7 @@ async function handleEvent(evt) {
       '• -1：自己取消',
       '',
       '輸入「list」查看報名狀況',
-      '輸入「delete」刪除場次',
+      '輸入「delete」或「刪除場次」可以刪除',
     ].join('\n');
 
     return client.replyMessage(evt.replyToken, [
@@ -412,7 +446,6 @@ async function handleEvent(evt) {
   // ---------- 列出場次 ----------
   if (/^\/?list\b/i.test(text)) {
     const db = await loadDB();
-    const to = getToFromEvent(evt);
     const openEvts = getOpenEvents(db, to);
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
@@ -424,32 +457,37 @@ async function handleEvent(evt) {
   // ---------- 刪除場次（刪除場次 / delete） ----------
   if (/^(?:\/?刪除場次|delete)\b/i.test(text)) {
     const db = await loadDB();
-    const to = getToFromEvent(evt);
-    const sourceType = evt.source?.type || '';
     const openEvts = getOpenEvents(db, to);
 
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次可刪除～' });
     }
 
+    // 單場 -> 直接刪
     if (openEvts.length === 1) {
       const e = openEvts[0];
       delete db.events[e.id];
       await saveDB(db);
 
-      logToSheet([
-        new Date().toISOString(),
-        await resolveDisplayName(evt),
-        evt.source.userId || '',
+      await logToSheet({
+        name: await resolveDisplayName(evt),
+        userId: evt.source.userId || '',
         sourceType,
         to,
-        'delete',
-        `${e.date} ${e.timeRange} ${e.location}`
-      ]);
+        action: 'delete_event',
+        detail: '單場直接刪除',
+        eventDate: e.date,
+        eventTime: e.timeRange,
+        location: e.location,
+      });
 
-      return client.replyMessage(evt.replyToken, { type: 'text', text: `已刪除：${mdDisp(e.date)} ${e.timeRange}／${e.location}` });
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: `已刪除：${mdDisp(e.date)} ${e.timeRange}／${e.location}`
+      });
     }
 
+    // 多場 -> 跳選單
     return client.replyMessage(evt.replyToken, buildDeleteChooseQuickReply(openEvts));
   }
 
@@ -460,8 +498,6 @@ async function handleEvent(evt) {
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
 
     const db = await loadDB();
-    const to = getToFromEvent(evt);
-    const sourceType = evt.source?.type || '';
     const openEvts = getOpenEvents(db, to);
     const target = openEvts.find(e => e.date === dateStr);
 
@@ -472,17 +508,22 @@ async function handleEvent(evt) {
     delete db.events[target.id];
     await saveDB(db);
 
-    logToSheet([
-      new Date().toISOString(),
-      await resolveDisplayName(evt),
-      evt.source.userId || '',
+    await logToSheet({
+      name: await resolveDisplayName(evt),
+      userId: evt.source.userId || '',
       sourceType,
       to,
-      'delete',
-      `${target.date} ${target.timeRange} ${target.location}`
-    ]);
+      action: 'delete_event',
+      detail: '選單刪除',
+      eventDate: target.date,
+      eventTime: target.timeRange,
+      location: target.location,
+    });
 
-    return client.replyMessage(evt.replyToken, { type: 'text', text: `已刪除：${mdDisp(target.date)} ${target.timeRange}／${target.location}` });
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text: `已刪除：${mdDisp(target.date)} ${target.timeRange}／${target.location}`
+    });
   }
 
   // ---------- +N / -N ----------
@@ -491,8 +532,6 @@ async function handleEvent(evt) {
     const { sign, n, dateStr } = pm;
 
     const db = await loadDB();
-    const to = getToFromEvent(evt);
-    const sourceType = evt.source?.type || '';
     const openEvts = getOpenEvents(db, to);
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
@@ -511,10 +550,12 @@ async function handleEvent(evt) {
       return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, tag));
     }
 
+    // 已完全結束 -> 一律不允許
     if (isExpiredEvent(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作～' });
     }
 
+    // 開打後 60 分鐘停止「報名 +」，但「取消 -」到結束前仍可
     if (sign > 0 && isSignupClosed(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '報名時間已過，下次早點報名唷～' });
     }
@@ -525,17 +566,20 @@ async function handleEvent(evt) {
     if (sign > 0) {
       const ret = addPeople(targetEvt, userId, name, n);
       await saveDB(db);
+
       const cur = totalCount(targetEvt.attendees);
 
-      logToSheet([
-        new Date().toISOString(),
+      await logToSheet({
         name,
         userId,
         sourceType,
         to,
-        'add',
-        `+${n}@${targetEvt.date}; status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
-      ]);
+        action: 'signup',
+        detail: `+${n}（status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}）`,
+        eventDate: targetEvt.date,
+        eventTime: targetEvt.timeRange,
+        location: targetEvt.location,
+      });
 
       let msg1 = '';
       if (ret.status === 'main') {
@@ -546,45 +590,55 @@ async function handleEvent(evt) {
         msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
       }
 
-      return client.replyMessage(evt.replyToken, [{ type: 'text', text: msg1 }, renderEventCard(targetEvt)]);
+      return client.replyMessage(evt.replyToken, [
+        { type: 'text', text: msg1 },
+        renderEventCard(targetEvt),
+      ]);
     } else {
+      // 減人（取消）
       removePeople(targetEvt, userId, n);
       await saveDB(db);
+
       const cur = totalCount(targetEvt.attendees);
 
-      logToSheet([
-        new Date().toISOString(),
+      await logToSheet({
         name,
         userId,
         sourceType,
         to,
-        'remove',
-        `-${Math.abs(n)}@${targetEvt.date}; cur=${cur}/${targetEvt.max}`
-      ]);
+        action: 'cancel',
+        detail: `-${Math.abs(n)}（cur=${cur}/${targetEvt.max}）`,
+        eventDate: targetEvt.date,
+        eventTime: targetEvt.timeRange,
+        location: targetEvt.location,
+      });
 
       const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
-      return client.replyMessage(evt.replyToken, [{ type: 'text', text: msg1 }, renderEventCard(targetEvt)]);
+      return client.replyMessage(evt.replyToken, [
+        { type: 'text', text: msg1 },
+        renderEventCard(targetEvt),
+      ]);
     }
   }
 
   return;
 }
 
-// ====== 自動提醒（每 60 秒掃描一次） ======
+// ====== 自動提醒（每 60 秒掃一次） ======
 async function reminderTick() {
   try {
     const db = await loadDB();
-    const events = Object.values(db.events || {});
+    const events = Object.values(db.events || []);
     if (!events.length) return;
 
     for (const e of events) {
-      if (!e || e.reminded) continue;
-      if (!e.to) continue;
+      if (!e || e.reminded) continue; // 已提醒過
+      if (!e.to) continue;            // 舊資料可能沒有 to
       if (isExpiredEvent(e)) continue;
 
       const mins = minutesToStart(e);
 
-      // 開打前 REMIND_BEFORE_MIN ~ 1 分鐘之間，推一次提醒
+      // REMIND_BEFORE_MIN ~ 1 分鐘之間推一次
       if (mins <= REMIND_BEFORE_MIN && mins > 0) {
         let minsText = `${mins} 分鐘`;
         if (mins === 60) minsText = '1小時';
@@ -600,22 +654,23 @@ async function reminderTick() {
         e.remindedAt = Date.now();
         await saveDB(db);
 
-        logToSheet([
-          new Date().toISOString(),
-          '(system)',
-          '',
-          'system',
-          e.to,
-          'remind',
-          `${e.date} ${e.timeRange} ${e.location} - ${mins === 60 ? '1小時前' : mins + '分鐘前'}`
-        ]);
+        await logToSheet({
+          name: '(system)',
+          userId: '',
+          sourceType: 'system',
+          to: e.to,
+          action: 'remind',
+          detail: mins === 60 ? '1小時前' : `${mins}分鐘前`,
+          eventDate: e.date,
+          eventTime: e.timeRange,
+          location: e.location,
+        });
       }
     }
   } catch (err) {
     console.warn('reminderTick error:', err.message);
   }
 }
-
 setInterval(reminderTick, 60 * 1000);
 
 // ====== 啟動 ======
