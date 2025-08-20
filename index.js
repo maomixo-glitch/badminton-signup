@@ -14,7 +14,7 @@ async function getSheetAuth() {
   return SHEET_AUTH;
 }
 
-// ====== 將操作寫入 signup 分頁的輔助函式（非同步 fire-and-forget） ======
+// ====== 將操作寫入 signup 分頁（非同步 fire-and-forget） ======
 async function logToSheet(values) {
   try {
     const auth = await getSheetAuth();
@@ -25,7 +25,9 @@ async function logToSheet(values) {
 }
 
 // ====== DB in memory + Google Sheet 持久化 ======
-const DEFAULT_MAX = 8;
+const DEFAULT_MAX = 8;              // 預設正取上限
+const MAX_ADD_ONCE = 10;            // 單次最多 +/-
+const MAX_MESSAGES_PER_LIST = 5;    // list 最多回幾張卡
 
 function ensureDBShape(db) {
   if (!db) db = {};
@@ -52,6 +54,8 @@ async function saveDB(db) {
 }
 
 // ====== 小工具 ======
+const SIGNUP_DEADLINE_MINUTES = 60; // 開始後 60 分鐘截止報名
+
 const pad2 = (n) => String(n).padStart(2, '0');
 const weekdayZh = (d) => ['日','一','二','三','四','五','六'][d.getDay()];
 const mdDisp = (ymd) => {
@@ -83,6 +87,12 @@ function endDateObj(dateYMD, range) {
 function isExpiredEvent(e) {
   return new Date() >= endDateObj(e.date, e.timeRange);
 }
+function isSignupClosed(e) {
+  const start = new Date(`${e.date}T${e.timeRange.split('-')[0]}:00+08:00`);
+  const deadline = new Date(start.getTime() + SIGNUP_DEADLINE_MINUTES * 60000);
+  // 介於「開打後 N 分」與「結束前」都算報名截止
+  return new Date() >= deadline && new Date() < endDateObj(e.date, e.timeRange);
+}
 function getOpenEvents(db) {
   return Object.values(db.events)
     .filter(e => !isExpiredEvent(e))
@@ -97,9 +107,7 @@ const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNE
 const client = new line.Client(config);
 const app = express();
 
-app.get("/healthz", (req, res) => {
-  res.status(200).send("OK");
-});
+app.get('/healthz', (_req, res) => res.status(200).send('OK'));
 
 // 先回 200，再背景處理，避免冷啟時 webhook 超時
 app.post('/webhook', line.middleware(config), async (req, res) => {
@@ -180,7 +188,7 @@ function parsePlusMinus(text) {
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
-  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, 10));
+  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, MAX_ADD_ONCE));
   let dateStr = m[3] || '';
   if (dateStr) {
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
@@ -226,6 +234,17 @@ function renderEventCard(e) {
     lines = lines.concat(['--------------------', '🕒 備取名單：', ...waitLines]);
   }
   return { type: 'text', text: lines.join('\n').slice(0, 4900) };
+}
+
+// ====== 刪除場次：格式化確認訊息 ======
+function renderDeletedMsg(e) {
+  const d = new Date(`${e.date}T00:00:00+08:00`);
+  return [
+    '🗑 已刪除場次：',
+    `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
+    `⏰ ${e.timeRange}`,
+    `📍 ${e.location}`
+  ].join('\n');
 }
 
 // ====== 正取/備取邏輯 ======
@@ -365,14 +384,85 @@ async function handleEvent(evt) {
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
     }
-    const msgs = openEvts.slice(0, 5).map(renderEventCard);
+    const msgs = openEvts.slice(0, MAX_MESSAGES_PER_LIST).map(renderEventCard);
     return client.replyMessage(evt.replyToken, msgs);
   }
 
-  // +N / -N
+  // ====== 刪除場次 ======
+  if (/^(刪除場次|\/?del)\b/i.test(text)) {
+    const db = await loadDB();
+    const openEvts = getOpenEvents(db);
+
+    if (!openEvts.length) {
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: '目前沒有可刪除的開放中場次唷～'
+      });
+    }
+
+    // 支援「刪除場次 @9/06」或「刪除場次 @2025-09-06」
+    const m = text.match(/@([0-9\/\-]+)/);
+    if (m) {
+      let dateStr = m[1];
+      if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        return client.replyMessage(evt.replyToken, { type: 'text', text: '日期格式錯誤，請用 9/06 或 2025-09-06' });
+      }
+      const target = openEvts.find(e => e.date === dateStr);
+      if (!target) {
+        return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期或已過期～' });
+      }
+
+      delete db.events[target.id];
+      await saveDB(db);
+
+      (async () => {
+        try {
+          const who = await resolveDisplayName(evt);
+          logToSheet([
+            new Date().toISOString(),
+            who,
+            evt.source.userId || '',
+            'delete',
+            `${target.date} ${target.timeRange} ${target.location}`
+          ]);
+        } catch {}
+      })();
+
+      return client.replyMessage(evt.replyToken, { type: 'text', text: renderDeletedMsg(target) });
+    }
+
+    // 沒帶日期：只有一場就直接刪，多場就跳 Quick Reply
+    if (openEvts.length === 1) {
+      const target = openEvts[0];
+      delete db.events[target.id];
+      await saveDB(db);
+
+      (async () => {
+        try {
+          const who = await resolveDisplayName(evt);
+          logToSheet([
+            new Date().toISOString(),
+            who,
+            evt.source.userId || '',
+            'delete',
+            `${target.date} ${target.timeRange} ${target.location}`
+          ]);
+        } catch {}
+      })();
+
+      return client.replyMessage(evt.replyToken, { type: 'text', text: renderDeletedMsg(target) });
+    } else {
+      // 多場：跳出日期按鈕；點了會送「刪除場次 @MM/DD」
+      return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, '刪除場次'));
+    }
+  }
+
+  // ====== +N / -N ======
   const pm = parsePlusMinus(text);
   if (pm) {
     const { sign, n, dateStr } = pm;
+
     const db = await loadDB();
     const openEvts = getOpenEvents(db);
     if (!openEvts.length) {
@@ -392,8 +482,14 @@ async function handleEvent(evt) {
       return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, tag));
     }
 
+    // 到結束時間就一律不允許
     if (isExpiredEvent(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作～' });
+    }
+
+    // 開打後 60 分鐘停止「報名 +」，但「取消 -」到結束前仍可
+    if (sign > 0 && isSignupClosed(targetEvt)) {
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '報名時間已過，下次早點報名唷～' });
     }
 
     const userId = evt.source.userId || 'anon';
@@ -402,13 +498,18 @@ async function handleEvent(evt) {
     if (sign > 0) {
       const ret = addPeople(targetEvt, userId, name, n);
       await saveDB(db);
+
       const cur = totalCount(targetEvt.attendees);
 
+      // 背景寫入：報名
       logToSheet([
-        new Date().toISOString(), name, userId, 'add',
+        new Date().toISOString(),
+        name,
+        userId,
+        'add',
         `+${n}@${targetEvt.date}`,
         `status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}`
-      ]);
+      ]).catch(e => console.warn('logToSheet add failed:', e.message));
 
       let msg1 = '';
       if (ret.status === 'main') {
@@ -418,20 +519,27 @@ async function handleEvent(evt) {
       } else {
         msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
       }
+
       return client.replyMessage(evt.replyToken, [
         { type: 'text', text: msg1 },
         renderEventCard(targetEvt),
       ]);
     } else {
+      // 減人（取消）
       removePeople(targetEvt, userId, n);
       await saveDB(db);
+
       const cur = totalCount(targetEvt.attendees);
 
+      // 背景寫入：取消
       logToSheet([
-        new Date().toISOString(), name, userId, 'remove',
+        new Date().toISOString(),
+        name,
+        userId,
+        'remove',
         `-${Math.abs(n)}@${targetEvt.date}`,
         `cur=${cur}/${targetEvt.max}`
-      ]);
+      ]).catch(e => console.warn('logToSheet remove failed:', e.message));
 
       const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, [
@@ -448,9 +556,9 @@ async function handleEvent(evt) {
       text:
         '指令：\n' +
         '• /new 9/06 18:00-20:00 大安運動中心 羽10（可選 max=8）\n' +
-        '• /list（列出所有開放中場次）\n' +
-        '• +1 / +2 / -1（若多場會跳出日期選擇）\n' +
-        '• +3 @9/06（直接指定日期）',
+        '• list（列出所有開放中場次）\n' +
+        '• +1 / +2 / -1（若多場會跳出日期選擇；也可 +3 @9/06）\n' +
+        '• 刪除場次（單場直接刪；多場會跳選擇；也可 刪除場次 @9/06）',
     });
   }
 }
