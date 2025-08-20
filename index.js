@@ -609,7 +609,7 @@ async function reminderTick() {
         let minsText = `${mins} 分鐘`;
       if (mins === 60) minsText = '1小時';
 
-      const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）再 ${minsText}後開始！`;
+      const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）再 ${minsText} 後開始！`;
 
         const messages = [
           { type: 'text', text: title },
