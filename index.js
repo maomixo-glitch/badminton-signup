@@ -434,7 +434,7 @@ async function handleEvent(evt) {
       '• -1：自己取消',
       '',
       '輸入「list」查看報名狀況',
-      '輸入「delete」或「刪除場次」可以刪除',
+      '輸入「delete」可刪除場次',
     ].join('\n');
 
     return client.replyMessage(evt.replyToken, [
