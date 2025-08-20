@@ -236,27 +236,33 @@ function addPeople(evtObj, userId, name, n) {
 }
 function removePeople(evtObj, userId, nAbs) {
   let toRemove = Math.abs(nAbs);
-  let idx = findIndexById(evtObj.attendees, userId);
-  if (idx !== -1) {
-    const m = evtObj.attendees[idx];
+
+  // ① 先從「自己的備取」扣
+  let w = findIndexById(evtObj.waitlist, userId);
+  if (w !== -1 && toRemove > 0) {
+    const m = evtObj.waitlist[w];
     if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
-    else { toRemove -= m.count; evtObj.attendees.splice(idx, 1); }
+    else { toRemove -= m.count; evtObj.waitlist.splice(w, 1); }
   }
-  if (toRemove > 0) {
-    let w = findIndexById(evtObj.waitlist, userId);
-    if (w !== -1) {
-      const m = evtObj.waitlist[w];
-      if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
-      else { toRemove -= m.count; evtObj.waitlist.splice(w, 1); }
-    }
+
+  // ② 再從「自己的正取」扣
+  let a = findIndexById(evtObj.attendees, userId);
+  if (a !== -1 && toRemove > 0) {
+    const m = evtObj.attendees[a];
+    if (m.count > toRemove) { m.count -= toRemove; toRemove = 0; }
+    else { toRemove -= m.count; evtObj.attendees.splice(a, 1); }
   }
+
+  // ③ 正取若有空缺 -> 從備取 FIFO 遞補
   let cur = totalCount(evtObj.attendees);
   while (cur < evtObj.max && evtObj.waitlist.length > 0) {
     const first = evtObj.waitlist[0];
     const canTake = Math.min(first.count, evtObj.max - cur);
+
     const i = findIndexById(evtObj.attendees, first.userId);
     if (i === -1) evtObj.attendees.push({ userId: first.userId, name: first.name, count: canTake });
     else evtObj.attendees[i].count += canTake;
+
     first.count -= canTake;
     cur += canTake;
     if (first.count <= 0) evtObj.waitlist.shift();
