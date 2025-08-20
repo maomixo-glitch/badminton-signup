@@ -11,12 +11,12 @@ function getAuth() {
   );
 }
 
-// 追加一列到 signup 分頁（統一 7 欄：A:G）
+// 追加一列到 signup 分頁（統一 7 欄：A:J）
 async function appendRow(auth, values) {
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.SHEET_ID,
-    range: 'signup!A:G',           // ★ 統一 7 欄
+    range: 'signup!A:J',           // ★ 統一 7 欄
     valueInputOption: 'RAW',
     requestBody: { values: [values] },
   });
