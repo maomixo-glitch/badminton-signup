@@ -506,7 +506,7 @@ async function handleEvent(evt) {
     const target = openEvts.find(e => e.date === dateStr);
 
     if (!target) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期的開放場次～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期的開放場次~' });
     }
 
     delete db.events[target.id];
@@ -647,7 +647,7 @@ async function reminderTick() {
         let minsText = `${mins} 分鐘`;
         if (mins === 60) minsText = '1小時';
 
-        const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}） ${minsText} 後開始！`;
+        const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）${minsText}後開始！`;
         const messages = [{ type: 'text', text: title }, renderEventCard(e)];
 
         await client.pushMessage(e.to, messages).catch(err => {
