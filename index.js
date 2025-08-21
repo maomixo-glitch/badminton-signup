@@ -186,7 +186,7 @@ function renderEventCard(e) {
 
   let lines = [
     '🏸 羽球報名',
-    `📅 ${mdDisp(e.date)}(${weekdayZh(d)})｜${e.timeRange}`,
+    `📅 ${mdDisp(e.date)}(${weekdayZh(d)})${e.timeRange}`,
     `📍 ${e.location}`,
     '====================',
     `✅ 正式名單 (${cur}/${e.max}人)：`,
@@ -429,7 +429,7 @@ async function handleEvent(evt) {
     const d = new Date(`${p.date}T00:00:00+08:00`);
     const msg = [
       '✨ 羽球報名開始！',
-      `📅 ${mdDisp(p.date)}(${weekdayZh(d)})｜${p.timeRange}`,
+      `📅 ${mdDisp(p.date)}(${weekdayZh(d)})${p.timeRange}`,
       `📍 ${p.location}`,
       '',
       '📝 報名方式：',
