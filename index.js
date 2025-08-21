@@ -179,14 +179,13 @@ function renderEventCard(e) {
   const cur = totalCount(e.attendees);
   const mainLines = e.attendees.length
     ? e.attendees.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
-    : ['(目前還沒有人報名～)'];
+    : ['(目前還沒有人報名ಠ_ಠ)'];
   const waitLines = e.waitlist.length
     ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
     : [];
   let lines = [
-    '✨ 羽球報名',
-    `🗓 ${mdDisp(e.date)}(${weekdayZh(d)})`,
-    `⏰ ${e.timeRange}`,
+    '🏸 羽球報名',
+    `📅 ${mdDisp(p.date)}(${weekdayZh(d)})｜${p.timeRange}`,
     `📍 ${e.location}`,
     '====================',
     `✅ 正式名單 (${cur}/${e.max}人)：`,
@@ -391,7 +390,7 @@ async function handleEvent(evt) {
       });
     }
     if (isExpiredEvent({ date: p.date, timeRange: p.timeRange })) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立~' });
     }
 
     const db = await loadDB();
@@ -428,11 +427,9 @@ async function handleEvent(evt) {
 
     const d = new Date(`${p.date}T00:00:00+08:00`);
     const msg = [
-      '📌 羽球報名開始！',
-      `📅 ${mdDisp(p.date)}(${weekdayZh(d)})`,
-      `⏰ ${p.timeRange}`,
+      '✨ 羽球報名開始！',
+      `📅 ${mdDisp(p.date)}(${weekdayZh(d)})｜${p.timeRange}`,
       `📍 ${p.location}`,
-      `👥 名額：${p.max || DEFAULT_MAX} 人`,
       '',
       '📝 報名方式：',
       '• +1：自己 (1人)',
@@ -454,7 +451,7 @@ async function handleEvent(evt) {
     const db = await loadDB();
     const openEvts = getOpenEvents(db, to);
     if (!openEvts.length) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷~' });
     }
     const msgs = openEvts.slice(0, 5).map(renderEventCard);
     return client.replyMessage(evt.replyToken, msgs);
@@ -466,7 +463,7 @@ async function handleEvent(evt) {
     const openEvts = getOpenEvents(db, to);
 
     if (!openEvts.length) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次可刪除～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次可刪除~' });
     }
 
     // 單場 -> 直接刪
@@ -563,7 +560,7 @@ async function handleEvent(evt) {
 
     // 開打後 60 分鐘停止「報名 +」，但「取消 -」到結束前仍可
     if (sign > 0 && isSignupClosed(targetEvt)) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '報名時間已過，下次早點報名唷～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '報名時間已過，下次早點報名ᕕ(ᐛ)ᕗ' });
     }
 
     const userId = evt.source.userId || 'anon';
@@ -619,7 +616,7 @@ async function handleEvent(evt) {
         location: targetEvt.location,
       });
 
-      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (T_T)\n目前：${cur}/${targetEvt.max}`;
+      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 ヽ(#`Д´)ﾉ\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, [
         { type: 'text', text: msg1 },
         renderEventCard(targetEvt),
@@ -649,7 +646,7 @@ async function reminderTick() {
         let minsText = `${mins} 分鐘`;
         if (mins === 60) minsText = '1小時';
 
-        const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）再 ${minsText} 後開始！`;
+        const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}） ${minsText} 後開始！`;
         const messages = [{ type: 'text', text: title }, renderEventCard(e)];
 
         await client.pushMessage(e.to, messages).catch(err => {
