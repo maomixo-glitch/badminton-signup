@@ -13,15 +13,16 @@ async function getSheetAuth() {
 }
 
 // ====== 依新版欄位(A:J)寫入 signup 分頁 ======
-**
- * row schema: [
- *   timestamp, name, user_id, sourceType, to, action, detail, event_date, event_time, location
- * ]
+/**
+ * Append one row to "signup" sheet (A:J).
+ * Columns:
+ * A timestamp (ISO), B name, C user_id, D sourceType, E to,
+ * F action, G detail, H event_date (YYYY-MM-DD), I event_time (HH:MM-HH:MM), J location
  */
 async function logToSheetRow(row) {
   try {
     const auth = await getSheetAuth();
-    await appendRow(auth, row); // 你的 gsheet.js 會把它 append 到 signup!A:J
+    await appendRow(auth, row); // 你的 gsheet.js 會 append 到 signup!A:J
   } catch (e) {
     console.warn('logToSheet failed:', e.message);
   }
