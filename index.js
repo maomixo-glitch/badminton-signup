@@ -13,7 +13,7 @@ async function getSheetAuth() {
 }
 
 // ====== 依新版欄位(A:J)寫入 signup 分頁 ======
-/**
+**
  * row schema: [
  *   timestamp, name, user_id, sourceType, to, action, detail, event_date, event_time, location
  * ]
@@ -355,7 +355,7 @@ function parseNewPayload(text) {
   const cNum = court.match(/(\d+)/);
   if (cNum) max = Math.max(1, parseInt(cNum[1], 10));
 
-  return { date: ymd, timeRange, location: court ? `${location}／${court}` : location, max };
+  return { date: ymd, timeRange, location: court ? `${location}｜${court}` : location, max };
 }
 
 // ====== +N / -N 解析 ======
@@ -487,7 +487,7 @@ async function handleEvent(evt) {
 
       return client.replyMessage(evt.replyToken, {
         type: 'text',
-        text: `已刪除：${mdDisp(e.date)} ${e.timeRange}／${e.location}`
+        text: `已刪除：${mdDisp(e.date)} ${e.timeRange}｜${e.location}`
       });
     }
 
@@ -526,7 +526,7 @@ async function handleEvent(evt) {
 
     return client.replyMessage(evt.replyToken, {
       type: 'text',
-      text: `已刪除：${mdDisp(target.date)} ${target.timeRange}／${target.location}`
+      text: `已刪除：${mdDisp(target.date)} ${target.timeRange}｜${target.location}`
     });
   }
 
