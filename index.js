@@ -538,14 +538,14 @@ async function handleEvent(evt) {
     const db = await loadDB();
     const openEvts = getOpenEvents(db, to);
     if (!openEvts.length) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷~' });
     }
 
     let targetEvt = null;
     if (dateStr) {
       targetEvt = openEvts.find(e => e.date === dateStr);
       if (!targetEvt) {
-        return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期或已過期～' });
+        return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期或已過期~' });
       }
     } else if (openEvts.length === 1) {
       targetEvt = openEvts[0];
@@ -556,7 +556,7 @@ async function handleEvent(evt) {
 
     // 已完全結束 -> 一律不允許
     if (isExpiredEvent(targetEvt)) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作～' });
+      return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作~' });
     }
 
     // 開打後 60 分鐘停止「報名 +」，但「取消 -」到結束前仍可
@@ -617,7 +617,7 @@ async function handleEvent(evt) {
         location: targetEvt.location,
       });
 
-      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 ヽ(#`Д´)ﾉ\n目前：${cur}/${targetEvt.max}`;
+      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, [
         { type: 'text', text: msg1 },
         renderEventCard(targetEvt),
