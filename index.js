@@ -183,9 +183,10 @@ function renderEventCard(e) {
   const waitLines = e.waitlist.length
     ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
     : [];
+
   let lines = [
     '🏸 羽球報名',
-    `📅 ${mdDisp(p.date)}(${weekdayZh(d)})｜${p.timeRange}`,
+    `📅 ${mdDisp(e.date)}(${weekdayZh(d)})｜${e.timeRange}`,
     `📍 ${e.location}`,
     '====================',
     `✅ 正式名單 (${cur}/${e.max}人)：`,
