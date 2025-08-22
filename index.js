@@ -287,6 +287,39 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   }
 });
 
+// ✅ 每週六 23:56 推播
+const GROUP_ID = 'Cxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; // 你的群組 ID
+cron.schedule('56 23 * * 6', async () => {
+  try {
+    await client.pushMessage(GROUP_ID, {
+      type: 'text',
+      text:
+        '⏰ 記得搶羽球場地！現在！NOW！\n' +
+        '大安👉https://reurl.cc/EQVqO1\n' +
+        '信義👉https://reurl.cc/ekM00L'
+    });
+    console.log('weekly reminder sent');
+  } catch (err) {
+    console.warn('weekly reminder failed:', err.message);
+  }
+});
+
+// 啟動 server
+app.listen(3000, () => {
+  console.log("Server running on port 3000");
+});
+
+// 處理事件
+function handleEvent(event) {
+  if (event.type !== "message" || event.message.type !== "text") {
+    return Promise.resolve(null);
+  }
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: event.message.text
+  });
+}
+
 // ====== 顯示名稱（快取到 DB.names） ======
 async function resolveDisplayName(evt) {
   const db = await loadDB();
