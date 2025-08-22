@@ -290,7 +290,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
 // ✅ 每週六 23:56 推播
 const GROUP_ID = 'Cd564f9c185a66079523681dece397715'; // 你的群組 ID
-cron.schedule('56 23 * * 6', async () => {
+cron.schedule('20 10 * * 5', async () => {
   try {
     await client.pushMessage(GROUP_ID, {
       type: 'text',
