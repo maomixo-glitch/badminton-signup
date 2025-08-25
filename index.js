@@ -649,7 +649,7 @@ async function handleEvent(evt) {
         location: targetEvt.location,
       });
 
-      const msg1 = `✅ ${name} 羽球已取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
+      const msg1 = `✅ ${name} 羽球取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
     }
   }
