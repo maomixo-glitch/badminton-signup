@@ -622,7 +622,7 @@ async function handleEvent(evt) {
 
       let msg1 = '';
       if (ret.status === 'main') {
-        msg1 = `✅ ${name} 報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
+        msg1 = `✅ ${name} 羽球報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
       } else if (ret.status === 'wait') {
         msg1 = `🕒 ${name} 進入備取 ${ret.addedWait} 人（正取已滿）`;
       } else {
@@ -649,7 +649,7 @@ async function handleEvent(evt) {
         location: targetEvt.location,
       });
 
-      const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
+      const msg1 = `✅ ${name} 羽球已取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
       return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
     }
   }
