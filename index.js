@@ -629,10 +629,7 @@ async function handleEvent(evt) {
         msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
       }
 
-      return client.replyMessage(evt.replyToken, [
-        { type: 'text', text: msg1 },
-        renderEventCard(targetEvt),
-      ]);
+     return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
     } else {
       // 減人（取消）
       removePeople(targetEvt, userId, n);
@@ -653,10 +650,7 @@ async function handleEvent(evt) {
       });
 
       const msg1 = `✅ ${name} 已取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
-      return client.replyMessage(evt.replyToken, [
-        { type: 'text', text: msg1 },
-        renderEventCard(targetEvt),
-      ]);
+      return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
     }
   }
 
