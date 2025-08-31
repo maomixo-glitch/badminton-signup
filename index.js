@@ -363,12 +363,12 @@ function parseNewPayload(text) {
   let tail = parts.slice(2);
   let max = DEFAULT_MAX;
 
-  // 末尾可能有 max=8
-  const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
-  if (mMax) {
-    max = Math.max(1, parseInt(mMax[1], 10));
-    tail = tail.slice(0, -1);
-  }
+// 末尾可能有 max=8
+const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
+if (mMax) {
+  max = Math.max(1, parseInt(mMax[1], 10));
+  tail = tail.slice(0, -1);
+}
 
   let location = '';
   let court = '';
