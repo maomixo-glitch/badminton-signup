@@ -386,10 +386,6 @@ function parseNewPayload(text) {
 
   if (!parseTimeRange(timeRange)) return null;
 
-  // 如果場地尾碼有數字（如「羽10」），用它覆蓋人數上限
-  const cNum = court.match(/(\d+)/);
-  if (cNum) max = Math.max(1, parseInt(cNum[1], 10));
-
   return { date: ymd, timeRange, location: court ? `${location}｜${court}` : location, max };
 }
 
