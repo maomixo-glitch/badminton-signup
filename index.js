@@ -6,30 +6,32 @@ const line = require('@line/bot-sdk');
 const cron = require('node-cron');
 const { getAuth, appendRow, readConfig, writeConfig } = require('./gsheet');
 
-// ====== Google Sheet auth 快取 ======
+// ===================== 基本設定 =====================
+const { CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, PORT = 10000 } = process.env;
+const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNEL_SECRET };
+const client = new line.Client(config);
+const app = express();
+
+// 你的群組 ID（沿用你原本那個）
+const GROUP_ID = 'C0b50f32fbcc66de32339fe91f5240d7f';
+
+// ===================== Google Sheet auth 快取 =====================
 let SHEET_AUTH = null;
 async function getSheetAuth() {
   if (!SHEET_AUTH) SHEET_AUTH = getAuth();
   return SHEET_AUTH;
 }
 
-// ====== 依新版欄位(A:J)寫入 signup 分頁 ======
-/**
- * Append one row to "signup" sheet (A:J).
- * Columns:
- * A timestamp (ISO), B name, C user_id, D sourceType, E to,
- * F action, G detail, H event_date (YYYY-MM-DD), I event_time (HH:MM-HH:MM), J location
- */
+// ===================== Sheet log (signup!A:J) =====================
 async function logToSheetRow(row) {
   try {
     const auth = await getSheetAuth();
-    await appendRow(auth, row); // 你的 gsheet.js 會 append 到 signup!A:J
+    await appendRow(auth, row);
   } catch (e) {
     console.warn('logToSheet failed:', e.message);
   }
 }
 
-// 方便呼叫：用物件組合 row 後寫入
 async function logToSheet({
   name = '',
   userId = '',
@@ -56,14 +58,24 @@ async function logToSheet({
   await logToSheetRow(row);
 }
 
-// ====== DB in memory + Google Sheet 持久化 ======
-const DEFAULT_MAX = 8;
+// ===================== DB in memory + Google Sheet 持久化 =====================
+const DEFAULT_MAX = 10;
+const WAITLIST_MAX_DEFAULT = 6;
+
+const NORMAL_TYPE = 'N';
+const SEASON_TYPE = 'R';
+
+const SEASON_RANGE_START = '2026-01-01';
+const SEASON_RANGE_END = '2026-03-31';
+const SEASON_LOCATION = '大安運動中心｜羽9';
+const SEASON_TIME_RANGE = '12:00-14:00';
 
 function ensureDBShape(db) {
   if (!db) db = {};
   if (!db.config) db.config = { defaultMax: DEFAULT_MAX };
-  if (!db.events) db.events = {}; // id -> event
-  if (!db.names) db.names = {};   // userId -> displayName
+  if (!db.events) db.events = {};        // id -> event
+  if (!db.names) db.names = {};          // userId -> displayName
+  if (!db.coreMembers) db.coreMembers = {}; // userId -> true
   return db;
 }
 
@@ -83,21 +95,36 @@ async function saveDB(db) {
   await writeConfig(auth, MEM_DB);
 }
 
-// ====== 小工具 ======
-const SIGNUP_DEADLINE_MINUTES = 60; // 開始後 60 分鐘停止「報名 +」
+function isCore(db, userId) {
+  return !!(db.coreMembers && db.coreMembers[userId]);
+}
+
+// ===================== 小工具 =====================
+const SIGNUP_DEADLINE_MINUTES = 60; // 開打後 60 分鐘停止「報名 +」
 const REMIND_BEFORE_MIN = 60;       // 開打前 60 分提醒
 
 const pad2 = (n) => String(n).padStart(2, '0');
-const weekdayZh = (d) => ['日','一','二','三','四','五','六'][d.getDay()];
+const weekdayZh = (d) => ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
 const mdDisp = (ymd) => {
   const [, m, d] = ymd.split('-');
   return `${parseInt(m, 10)}/${parseInt(d, 10)}`;
 };
+
+// ⭐ 重要：支援跨年（9/06 這種）
+// - 先用今年年份組日期
+// - 若該日期 < 今天 (00:00) → 自動視為明年
 const toYYYYMMDDFromMD = (md) => {
   const [m, d] = md.split('/').map(v => parseInt(v, 10));
   const now = new Date();
-  return `${now.getFullYear()}-${pad2(m)}-${pad2(d)}`;
+  let year = now.getFullYear();
+
+  const todayYMD = new Date(year, now.getMonth(), now.getDate());
+  const candidate = new Date(year, m - 1, d);
+
+  if (candidate < todayYMD) year += 1;
+  return `${year}-${pad2(m)}-${pad2(d)}`;
 };
+
 function parseTimeRange(range) {
   const m = range.match(/^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/);
   if (!m) return null;
@@ -108,34 +135,7 @@ function parseTimeRange(range) {
     em: parseInt(m[4], 10),
   };
 }
-function endDateObj(dateYMD, range) {
-  const t = parseTimeRange(range);
-  if (!t) return new Date(`${dateYMD}T23:59:59+08:00`);
-  const d = new Date(`${dateYMD}T00:00:00+08:00`);
-  d.setHours(t.eh, t.em, 0, 0);
-  return d;
-}
-function isExpiredEvent(e) {
-  return new Date() >= endDateObj(e.date, e.timeRange);
-}
-function isSignupClosed(e) {
-  const start = new Date(`${e.date}T${e.timeRange.split('-')[0]}:00+08:00`);
-  const deadline = new Date(start.getTime() + SIGNUP_DEADLINE_MINUTES * 60000);
-  return new Date() >= deadline;
-}
-function getToFromEvent(evt) {
-  return evt?.source?.groupId || evt?.source?.roomId || evt?.source?.userId;
-}
-function getOpenEvents(db, to) {
-  return Object.values(db.events)
-    .filter(e => e.to === to)        // 只顯示同一對話的
-    .filter(e => !isExpiredEvent(e)) // 未過期
-    .sort((a, b) => (a.date + a.timeRange).localeCompare(b.date + b.timeRange));
-}
-const totalCount = (list) => list.reduce((a, m) => a + (m.count || 0), 0);
-const findIndexById = (list, id) => list.findIndex(m => m.userId === id);
 
-// 取得「開始時間」Date（+08:00）
 function startDateObj(e) {
   const t = parseTimeRange(e.timeRange);
   if (!t) return new Date(`${e.date}T00:00:00+08:00`);
@@ -143,12 +143,58 @@ function startDateObj(e) {
   const mm = String(t.sm).padStart(2, '0');
   return new Date(`${e.date}T${hh}:${mm}:00+08:00`);
 }
+
+function endDateObj(dateYMD, range) {
+  const t = parseTimeRange(range);
+  if (!t) return new Date(`${dateYMD}T23:59:59+08:00`);
+  const d = new Date(`${dateYMD}T00:00:00+08:00`);
+  d.setHours(t.eh, t.em, 0, 0);
+  return d;
+}
+
+function isExpiredEvent(e) {
+  return new Date() >= endDateObj(e.date, e.timeRange);
+}
+
+function isSignupClosed(e) {
+  const start = startDateObj(e);
+  const deadline = new Date(start.getTime() + SIGNUP_DEADLINE_MINUTES * 60000);
+  return new Date() >= deadline;
+}
+
+function getToFromEvent(evt) {
+  return evt?.source?.groupId || evt?.source?.roomId || evt?.source?.userId;
+}
+
+function getOpenEvents(db, to) {
+  return Object.values(db.events)
+    .filter(e => e.to === to)
+    .filter(e => !isExpiredEvent(e))
+    .sort((a, b) => (a.date + a.timeRange).localeCompare(b.date + b.timeRange));
+}
+
+const totalCount = (list) => list.reduce((a, m) => a + (m.count || 0), 0);
+const findIndexById = (list, id) => list.findIndex(m => m.userId === id);
+
 // 距離開始還有幾分鐘（負值代表已開始）
 function minutesToStart(e) {
   return Math.round((startDateObj(e) - new Date()) / 60000);
 }
 
-// Quick Reply：+ / - 選日期
+// ⭐ 季租場固定班底優先截止：週三 12:00
+// 做法：週六 12:00 往前推 3 天 = 週三 12:00
+function seasonCoreDeadline(e) {
+  if (e.type !== SEASON_TYPE) return null;
+  const d = new Date(`${e.date}T12:00:00+08:00`);
+  d.setDate(d.getDate() - 3);
+  return d;
+}
+
+function withinSeasonRange(ymd) {
+  return ymd >= SEASON_RANGE_START && ymd <= SEASON_RANGE_END;
+}
+
+// ===================== Quick Reply =====================
 function buildChooseDateQuickReply(openEvts, tagText) {
   return {
     type: 'text',
@@ -161,7 +207,7 @@ function buildChooseDateQuickReply(openEvts, tagText) {
     }
   };
 }
-// Quick Reply：刪除場次選日期
+
 function buildDeleteChooseQuickReply(openEvts) {
   return {
     type: 'text',
@@ -175,34 +221,75 @@ function buildDeleteChooseQuickReply(openEvts) {
   };
 }
 
-// 卡片
-function renderEventCard(e) {
+// ===================== 卡片 =====================
+function renderEventCard(e, coreMap = {}) {
   const d = new Date(`${e.date}T00:00:00+08:00`);
   const cur = totalCount(e.attendees);
+
   const mainLines = e.attendees.length
-    ? e.attendees.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
+    ? e.attendees.map((m, i) => {
+      const star = coreMap[m.userId] ? '*' : '';
+      return `${i + 1}. ${star}${m.name} (+${m.count})`;
+    })
     : ['(目前還沒有人報名ಠ_ಠ)'];
+
   const waitLines = e.waitlist.length
-    ? e.waitlist.map((m, i) => `${i + 1}. ${m.name} (+${m.count})`)
+    ? e.waitlist.map((m, i) => {
+      const star = coreMap[m.userId] ? '*' : '';
+      return `${i + 1}. ${star}${m.name} (+${m.count})`;
+    })
     : [];
 
+  const title = (e.type === SEASON_TYPE) ? '🏸【季租場】羽球報名' : '🏸 羽球報名';
+
   let lines = [
-    '🏸 羽球報名',
+    title,
     `📅 ${mdDisp(e.date)}(${weekdayZh(d)})${e.timeRange}`,
     `📍 ${e.location}`,
     '====================',
     `✅ 正式名單 (${cur}/${e.max}人)：`,
     ...mainLines,
   ];
+
   if (waitLines.length) {
-    lines = lines.concat(['--------------------', '🕒 備取名單：', ...waitLines]);
+    lines = lines.concat([
+      '--------------------',
+      `🕒 備取名單（上限 ${e.waitMax ?? WAITLIST_MAX_DEFAULT} 人）：`,
+      ...waitLines
+    ]);
+  } else {
+    lines = lines.concat([`🕒 備取名單（上限 ${e.waitMax ?? WAITLIST_MAX_DEFAULT} 人）：(目前無)`]);
   }
+
   return { type: 'text', text: lines.join('\n').slice(0, 4900) };
 }
 
-// ====== 正取/備取邏輯 ======
+// ===================== 正取/備取邏輯（含備取上限） =====================
 function addPeople(evtObj, userId, name, n) {
   let cur = totalCount(evtObj.attendees);
+  const waitMax = Number.isFinite(evtObj.waitMax) ? evtObj.waitMax : WAITLIST_MAX_DEFAULT;
+  let waitCur = totalCount(evtObj.waitlist);
+
+  let addedMain = 0;
+  let addedWait = 0;
+  let rejected = 0;
+
+  // helper: try add to waitlist with cap
+  function addToWait(count) {
+    if (count <= 0) return 0;
+    const canWait = Math.max(0, waitMax - waitCur);
+    const toWait = Math.min(count, canWait);
+    if (toWait <= 0) return 0;
+
+    const w = findIndexById(evtObj.waitlist, userId);
+    if (w !== -1) evtObj.waitlist[w].count += toWait;
+    else evtObj.waitlist.push({ userId, name, count: toWait });
+
+    waitCur += toWait;
+    return toWait;
+  }
+
+  // 1) 先補正取（若已在名單則加count，否則新增）
   const idx = findIndexById(evtObj.attendees, userId);
   if (idx !== -1) {
     const canAdd = Math.max(0, evtObj.max - cur);
@@ -211,35 +298,53 @@ function addPeople(evtObj, userId, name, n) {
       evtObj.attendees[idx].count += toMain;
       n -= toMain;
       cur += toMain;
+      addedMain += toMain;
     }
+    // 剩下進備取（但要吃備取上限）
     if (n > 0) {
-      const w = findIndexById(evtObj.waitlist, userId);
-      if (w !== -1) evtObj.waitlist[w].count += n;
-      else evtObj.waitlist.push({ userId, name, count: n });
-      return { status: 'wait', addedMain: toMain, addedWait: n };
+      const toWait = addToWait(n);
+      addedWait += toWait;
+      rejected += (n - toWait);
+      return {
+        status: (addedMain > 0 && addedWait > 0) ? 'mixed' : (addedWait > 0 ? 'wait' : 'reject'),
+        addedMain,
+        addedWait,
+        rejected
+      };
     }
-    return { status: 'main', addedMain: toMain, addedWait: 0 };
+    return { status: 'main', addedMain, addedWait: 0, rejected: 0 };
   }
 
+  // 還沒在正取名單
   const canAdd = Math.max(0, evtObj.max - cur);
   const toMain = Math.min(n, canAdd);
   if (toMain > 0) {
     evtObj.attendees.push({ userId, name, count: toMain });
     n -= toMain;
     cur += toMain;
+    addedMain += toMain;
   }
+
+  // 剩下進備取
   if (n > 0) {
-    const w = findIndexById(evtObj.waitlist, userId);
-    if (w !== -1) evtObj.waitlist[w].count += n;
-    else evtObj.waitlist.push({ userId, name, count: n });
-    return { status: toMain > 0 ? 'mixed' : 'wait', addedMain: toMain, addedWait: n };
+    const toWait = addToWait(n);
+    addedWait += toWait;
+    rejected += (n - toWait);
+    return {
+      status: (addedMain > 0 && addedWait > 0) ? 'mixed' : (addedWait > 0 ? 'wait' : 'reject'),
+      addedMain,
+      addedWait,
+      rejected
+    };
   }
-  return { status: 'main', addedMain: toMain, addedWait: 0 };
+
+  return { status: 'main', addedMain, addedWait: 0, rejected: 0 };
 }
+
 function removePeople(evtObj, userId, nAbs) {
   let toRemove = Math.abs(nAbs);
 
-  // ① 先從「自己的備取」扣
+  // ① 先從自己的備取扣
   let w = findIndexById(evtObj.waitlist, userId);
   if (w !== -1 && toRemove > 0) {
     const m = evtObj.waitlist[w];
@@ -247,7 +352,7 @@ function removePeople(evtObj, userId, nAbs) {
     else { toRemove -= m.count; evtObj.waitlist.splice(w, 1); }
   }
 
-  // ② 再從「自己的正取」扣
+  // ② 再從自己的正取扣
   let a = findIndexById(evtObj.attendees, userId);
   if (a !== -1 && toRemove > 0) {
     const m = evtObj.attendees[a];
@@ -271,57 +376,7 @@ function removePeople(evtObj, userId, nAbs) {
   }
 }
 
-// ====== LINE / Express ======
-const { CHANNEL_ACCESS_TOKEN, CHANNEL_SECRET, PORT = 10000 } = process.env;
-const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNEL_SECRET };
-const client = new line.Client(config);
-const app = express();
-
-// for UptimeRobot
-app.get('/healthz', (req, res) => res.status(200).send('OK'));
-
-// 先回 200 再背景處理，避免冷啟 webhook 超時
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  res.status(200).end();
-  for (const e of req.body.events) {
-    handleEvent(e).catch(err => console.error('handleEvent error:', err));
-  }
-});
-
-// ✅ 每週六 23:56 推播
-const GROUP_ID = 'C0b50f32fbcc66de32339fe91f5240d7f'; // 你的群組 ID
-cron.schedule('56 23 * * 6', async () => {
-  try {
-    await client.pushMessage(GROUP_ID, {
-      type: 'text',
-      text:
-        '⏰ 記得搶羽球場地！NOW！\n' +
-        '大安👉https://reurl.cc/GNNZRp\n' +
-        '信義👉https://reurl.cc/ZNNadg'
-    });
-    console.log('weekly reminder sent');
-  } catch (err) {
-    console.warn('weekly reminder failed:', err.message);
-  }
-});
-
-// 啟動 server
-app.listen(3000, () => {
-  console.log("Server running on port 3000");
-});
-
-// 處理事件
-function handleEvent(event) {
-  if (event.type !== "message" || event.message.type !== "text") {
-    return Promise.resolve(null);
-  }
-  return client.replyMessage(event.replyToken, {
-    type: "text",
-    text: event.message.text
-  });
-}
-
-// ====== 顯示名稱（快取到 DB.names） ======
+// ===================== 顯示名稱快取 =====================
 async function resolveDisplayName(evt) {
   const db = await loadDB();
   const cache = db.names;
@@ -349,11 +404,13 @@ async function resolveDisplayName(evt) {
   return userId.slice(-6);
 }
 
-// ====== /new 解析 ======
+// ===================== /new 解析（支援 /newN /newR） =====================
 function parseNewPayload(text) {
-  // /new 9/06 18:00-20:00 大安運動中心 羽10 [max=8]
-  // /new 2025-09-06 18:00-20:00 大安運動中心 羽10
-  const s = text.replace(/^\/new\s*/i, '').trim();
+  // /newR 2026-01-10 12:00-14:00 大安運動中心 羽9 max=10
+  const mType = text.match(/^\/new([NR])\s*/i);
+  const type = mType && mType[1] ? mType[1].toUpperCase() : NORMAL_TYPE;
+
+  const s = text.replace(/^\/new[NR]?\s*/i, '').trim();
   const parts = s.split(/\s+/).filter(Boolean);
   if (parts.length < 3) return null;
 
@@ -363,12 +420,12 @@ function parseNewPayload(text) {
   let tail = parts.slice(2);
   let max = DEFAULT_MAX;
 
-// 末尾可能有 max=8
-const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
-if (mMax) {
-  max = Math.max(1, parseInt(mMax[1], 10));
-  tail = tail.slice(0, -1);
-}
+  // 末尾可能有 max=8
+  const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
+  if (mMax) {
+    max = Math.max(1, parseInt(mMax[1], 10));
+    tail = tail.slice(0, -1);
+  }
 
   let location = '';
   let court = '';
@@ -386,12 +443,18 @@ if (mMax) {
 
   if (!parseTimeRange(timeRange)) return null;
 
-  return { date: ymd, timeRange, location: court ? `${location}｜${court}` : location, max };
+  return {
+    type,
+    date: ymd,
+    timeRange,
+    location: court ? `${location}｜${court}` : location,
+    max,
+  };
 }
 
-// ====== +N / -N 解析 ======
+// ===================== +N / -N 解析 =====================
 function parsePlusMinus(text) {
-  // +3、-1、+2 @9/06、-1 @2025-09-06
+  // +3、-1、+2 @9/06、-1 @2026-01-10
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
@@ -404,13 +467,170 @@ function parsePlusMinus(text) {
   return { sign, n, dateStr };
 }
 
-// ====== 指令處理 ======
+// ===================== 季租：找本週六日期 =====================
+function getUpcomingSaturdayYMD() {
+  const now = new Date();
+  const day = now.getDay(); // 0 Sun ... 6 Sat
+  const diff = (6 - day + 7) % 7; // 到週六的天數
+  const sat = new Date(now);
+  sat.setDate(now.getDate() + diff);
+
+  const y = sat.getFullYear();
+  const m = pad2(sat.getMonth() + 1);
+  const d = pad2(sat.getDate());
+  return `${y}-${m}-${d}`;
+}
+
+function findEventByDateAndType(db, to, ymd, type) {
+  return Object.values(db.events).find(e => e.to === to && e.date === ymd && e.type === type && !isExpiredEvent(e));
+}
+
+async function ensureSeasonEventForThisWeek(db, to) {
+  const ymd = getUpcomingSaturdayYMD();
+  if (!withinSeasonRange(ymd)) return null;
+
+  const existing = findEventByDateAndType(db, to, ymd, SEASON_TYPE);
+  if (existing) return existing;
+
+  const id = 'evt_' + Date.now();
+  db.events[id] = {
+    id,
+    date: ymd,
+    timeRange: SEASON_TIME_RANGE,
+    location: SEASON_LOCATION,
+    max: 10,
+    waitMax: 6,
+    attendees: [],
+    waitlist: [],
+    createdAt: Date.now(),
+    to,
+    reminded: false,
+    type: SEASON_TYPE,
+  };
+  await saveDB(db);
+  return db.events[id];
+}
+
+// ===================== LINE Webhook =====================
+app.get('/healthz', (req, res) => res.status(200).send('OK'));
+
+app.post('/webhook', line.middleware(config), async (req, res) => {
+  res.status(200).end();
+  for (const e of req.body.events) {
+    handleEvent(e).catch(err => console.error('handleEvent error:', err));
+  }
+});
+
+// ===================== 週六搶場提醒（保留你原本的） =====================
+cron.schedule('56 23 * * 6', async () => {
+  try {
+    await client.pushMessage(GROUP_ID, {
+      type: 'text',
+      text:
+        '⏰ 記得搶羽球場地！NOW！\n' +
+        '大安👉https://reurl.cc/GNNZRp\n' +
+        '信義👉https://reurl.cc/ZNNadg'
+    });
+    console.log('weekly reminder sent');
+  } catch (err) {
+    console.warn('weekly reminder failed:', err.message);
+  }
+});
+
+// ===================== 季租：週一 10:00 調查固定班底 =====================
+cron.schedule('0 10 * * 1', async () => {
+  try {
+    const db = await loadDB();
+    const evt = await ensureSeasonEventForThisWeek(db, GROUP_ID);
+    if (!evt) return;
+
+    const msg = [
+      '🏸【季租場】本週六固定班底調查（優先報名時段）',
+      `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
+      `📍 ${evt.location}`,
+      '',
+      '固定班底請直接輸入：+1（或 +2 帶朋友）',
+      '⚠️ 非固定班底：請等到週三 12:00 後再報名',
+      '',
+      '輸入 list 可查看名單（* 代表固定班底）'
+    ].join('\n');
+
+    await client.pushMessage(GROUP_ID, [
+      { type: 'text', text: msg },
+      renderEventCard(evt, db.coreMembers),
+    ]);
+  } catch (err) {
+    console.warn('monday core survey failed:', err.message);
+  }
+});
+
+// ===================== 季租：週三 12:00 開放臨打 =====================
+cron.schedule('0 12 * * 3', async () => {
+  try {
+    const db = await loadDB();
+    const evt = findEventByDateAndType(db, GROUP_ID, getUpcomingSaturdayYMD(), SEASON_TYPE);
+    if (!evt) return;
+
+    const msg = [
+      '🏸【季租場】臨打開放報名啦！',
+      `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
+      `📍 ${evt.location}`,
+      '',
+      '現在固定班底＆臨打都可以報名：+1 / +2',
+      `正取上限 10 人，備取上限 ${evt.waitMax ?? WAITLIST_MAX_DEFAULT} 人`,
+      '',
+      '輸入 list 可查看名單（* 代表固定班底）'
+    ].join('\n');
+
+    await client.pushMessage(GROUP_ID, [
+      { type: 'text', text: msg },
+      renderEventCard(evt, db.coreMembers),
+    ]);
+  } catch (err) {
+    console.warn('wednesday open guest failed:', err.message);
+  }
+});
+
+// ===================== 指令處理 =====================
 async function handleEvent(evt) {
   if (evt.type !== 'message' || evt.message.type !== 'text') return;
   const text = (evt.message.text || '').trim();
-
   const to = getToFromEvent(evt);
   const sourceType = evt.source?.type || 'user';
+
+  const db = await loadDB();
+  const userId = evt.source.userId || 'anon';
+  const name = await resolveDisplayName(evt);
+
+  // ---------- 固定班底：加入 ----------
+  if (/^(固定班底\+|我是固定班底)$/i.test(text)) {
+    db.coreMembers[userId] = true;
+    await saveDB(db);
+    return client.replyMessage(evt.replyToken, { type: 'text', text: `✅ 已將「${name}」設為固定班底` });
+  }
+
+  // ---------- 固定班底：移除 ----------
+  if (/^(固定班底\-|取消固定班底)$/i.test(text)) {
+    if (db.coreMembers[userId]) {
+      delete db.coreMembers[userId];
+      await saveDB(db);
+      return client.replyMessage(evt.replyToken, { type: 'text', text: `✅ 已將「${name}」從固定班底移除` });
+    }
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '你本來就不是固定班底啦～' });
+  }
+
+  // ---------- 固定班底名單 ----------
+  if (/^(固定班底名單|\/core_list)$/i.test(text)) {
+    const ids = Object.keys(db.coreMembers || {});
+    if (!ids.length) return client.replyMessage(evt.replyToken, { type: 'text', text: '目前還沒有設定固定班底唷～' });
+
+    const lines = ids.map((id, idx) => {
+      const n = db.names[id] || id.slice(-6);
+      return `${idx + 1}. *${n}`;
+    });
+
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '固定班底名單：\n' + lines.join('\n') });
+  }
 
   // ---------- 建立新場次 ----------
   if (/^\/new\b/i.test(text)) {
@@ -418,21 +638,27 @@ async function handleEvent(evt) {
     if (!p) {
       return client.replyMessage(evt.replyToken, {
         type: 'text',
-        text: '格式：/new 9/06 18:00-20:00 大安運動中心 羽10（可選 max=8）',
+        text:
+          '格式：\n' +
+          '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9 max=10（一般場）\n' +
+          '/newR 2026-01-10 12:00-14:00 大安運動中心 羽9 max=10（季租場）\n' +
+          '也可用：/newR 1/10 12:00-14:00 ...（會自動跨年）',
       });
     }
+
     if (isExpiredEvent({ date: p.date, timeRange: p.timeRange })) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立~' });
     }
 
-    const db = await loadDB();
     const id = 'evt_' + Date.now();
     db.events[id] = {
       id,
+      type: p.type || NORMAL_TYPE,
       date: p.date,
       timeRange: p.timeRange,
       location: p.location,
       max: p.max || DEFAULT_MAX,
+      waitMax: WAITLIST_MAX_DEFAULT,
       attendees: [],
       waitlist: [],
       createdAt: Date.now(),
@@ -441,16 +667,14 @@ async function handleEvent(evt) {
     };
     await saveDB(db);
 
-    // 背景 log
     (async () => {
-      const who = await resolveDisplayName(evt);
       await logToSheet({
-        name: who,
-        userId: evt.source.userId || '',
+        name,
+        userId,
         sourceType,
         to,
         action: 'create_event',
-        detail: `建立場次 max=${p.max || DEFAULT_MAX}`,
+        detail: `建立場次 type=${db.events[id].type} max=${db.events[id].max}`,
         eventDate: p.date,
         eventTime: p.timeRange,
         location: p.location,
@@ -458,8 +682,10 @@ async function handleEvent(evt) {
     })();
 
     const d = new Date(`${p.date}T00:00:00+08:00`);
+    const typeText = (db.events[id].type === SEASON_TYPE) ? '【季租場】' : '【一般場】';
+
     const msg = [
-      '✨ 羽球報名開始！',
+      `✨ ${typeText}羽球報名建立成功！`,
       `📅 ${mdDisp(p.date)}(${weekdayZh(d)})${p.timeRange}`,
       `📍 ${p.location}`,
       '',
@@ -470,43 +696,39 @@ async function handleEvent(evt) {
       '',
       '輸入「list」查看報名狀況',
       '輸入「delete」可刪除場次',
+      '（* 代表固定班底）',
     ].join('\n');
 
     return client.replyMessage(evt.replyToken, [
       { type: 'text', text: msg },
-      renderEventCard(db.events[id]),
+      renderEventCard(db.events[id], db.coreMembers),
     ]);
   }
 
   // ---------- 列出場次 ----------
   if (/^\/?list\b/i.test(text)) {
-    const db = await loadDB();
     const openEvts = getOpenEvents(db, to);
-    if (!openEvts.length) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷~' });
-    }
-    const msgs = openEvts.slice(0, 5).map(renderEventCard);
+    if (!openEvts.length) return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷~' });
+
+    const msgs = openEvts.slice(0, 5).map(e => renderEventCard(e, db.coreMembers));
     return client.replyMessage(evt.replyToken, msgs);
   }
 
   // ---------- 刪除場次（刪除場次 / delete） ----------
   if (/^(?:\/?刪除場次|delete)\b/i.test(text)) {
-    const db = await loadDB();
     const openEvts = getOpenEvents(db, to);
-
     if (!openEvts.length) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次可刪除~' });
     }
 
-    // 單場 -> 直接刪
     if (openEvts.length === 1) {
       const e = openEvts[0];
       delete db.events[e.id];
       await saveDB(db);
 
       await logToSheet({
-        name: await resolveDisplayName(evt),
-        userId: evt.source.userId || '',
+        name,
+        userId,
         sourceType,
         to,
         action: 'delete_event',
@@ -522,7 +744,6 @@ async function handleEvent(evt) {
       });
     }
 
-    // 多場 -> 跳選單
     return client.replyMessage(evt.replyToken, buildDeleteChooseQuickReply(openEvts));
   }
 
@@ -532,20 +753,17 @@ async function handleEvent(evt) {
     let dateStr = delMatch[1];
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
 
-    const db = await loadDB();
     const openEvts = getOpenEvents(db, to);
     const target = openEvts.find(e => e.date === dateStr);
 
-    if (!target) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期的開放場次~' });
-    }
+    if (!target) return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期的開放場次~' });
 
     delete db.events[target.id];
     await saveDB(db);
 
     await logToSheet({
-      name: await resolveDisplayName(evt),
-      userId: evt.source.userId || '',
+      name,
+      userId,
       sourceType,
       to,
       action: 'delete_event',
@@ -566,18 +784,13 @@ async function handleEvent(evt) {
   if (pm) {
     const { sign, n, dateStr } = pm;
 
-    const db = await loadDB();
     const openEvts = getOpenEvents(db, to);
-    if (!openEvts.length) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷~' });
-    }
+    if (!openEvts.length) return client.replyMessage(evt.replyToken, { type: 'text', text: '目前沒有開放中的場次唷~' });
 
     let targetEvt = null;
     if (dateStr) {
       targetEvt = openEvts.find(e => e.date === dateStr);
-      if (!targetEvt) {
-        return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期或已過期~' });
-      }
+      if (!targetEvt) return client.replyMessage(evt.replyToken, { type: 'text', text: '找不到該日期或已過期~' });
     } else if (openEvts.length === 1) {
       targetEvt = openEvts[0];
     } else {
@@ -585,18 +798,27 @@ async function handleEvent(evt) {
       return client.replyMessage(evt.replyToken, buildChooseDateQuickReply(openEvts, tag));
     }
 
-    // 已完全結束 -> 一律不允許
+    // 完全結束 -> 不允許
     if (isExpiredEvent(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作~' });
     }
 
-    // 開打後 60 分鐘停止「報名 +」，但「取消 -」到結束前仍可
+    // ⭐ 季租場：週一 10:00 ~ 週三 11:59 限固定班底報名（只擋 +）
+    if (targetEvt.type === SEASON_TYPE && sign > 0) {
+      const coreUntil = seasonCoreDeadline(targetEvt);
+      const now = new Date();
+      if (coreUntil && now < coreUntil && !isCore(db, userId)) {
+        return client.replyMessage(evt.replyToken, {
+          type: 'text',
+          text: '目前是固定班底優先報名時段，臨打請週三 12:00 之後再 +1 唷～'
+        });
+      }
+    }
+
+    // 開打後 60 分鐘停止「報名 +」
     if (sign > 0 && isSignupClosed(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '報名時間已過，下次早點報名ᕕ(ᐛ)ᕗ' });
     }
-
-    const userId = evt.source.userId || 'anon';
-    const name = await resolveDisplayName(evt);
 
     if (sign > 0) {
       const ret = addPeople(targetEvt, userId, name, n);
@@ -610,24 +832,34 @@ async function handleEvent(evt) {
         sourceType,
         to,
         action: 'signup',
-        detail: `+${n}（status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; cur=${cur}/${targetEvt.max}）`,
+        detail: `+${n}（status=${ret.status}; main=${ret.addedMain}; wait=${ret.addedWait}; rejected=${ret.rejected}; cur=${cur}/${targetEvt.max}）`,
         eventDate: targetEvt.date,
         eventTime: targetEvt.timeRange,
         location: targetEvt.location,
       });
 
+      if (ret.status === 'reject') {
+        return client.replyMessage(evt.replyToken, {
+          type: 'text',
+          text: `🧱 ${name} 這場正取滿了、備取也滿了（備取上限 ${targetEvt.waitMax ?? WAITLIST_MAX_DEFAULT} 人）`
+        });
+      }
+
       let msg1 = '';
       if (ret.status === 'main') {
-        msg1 = `✅ ${name} 羽球報名 ${ret.addedMain} 人成功 (ﾉ>ω<)ﾉ\n目前：${cur}/${targetEvt.max}`;
+        msg1 = `✅ ${name} 報名 ${ret.addedMain} 人成功\n目前：${cur}/${targetEvt.max}`;
       } else if (ret.status === 'wait') {
         msg1 = `🕒 ${name} 進入備取 ${ret.addedWait} 人（正取已滿）`;
       } else {
         msg1 = `✅ ${name} 正取 ${ret.addedMain} 人；🕒 備取 ${ret.addedWait} 人\n目前：${cur}/${targetEvt.max}`;
       }
 
-     return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
+      if (ret.rejected > 0) {
+        msg1 += `\n⚠️ 另外有 ${ret.rejected} 人因備取已滿未加入。`;
+      }
+
+      return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
     } else {
-      // 減人（取消）
       removePeople(targetEvt, userId, n);
       await saveDB(db);
 
@@ -645,35 +877,33 @@ async function handleEvent(evt) {
         location: targetEvt.location,
       });
 
-      const msg1 = `✅ ${name} 羽球取消 ${Math.abs(n)} 人 (╬ﾟдﾟ)\n目前：${cur}/${targetEvt.max}`;
-      return client.replyMessage(evt.replyToken, { type: 'text', text: msg1 });
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: `✅ ${name} 取消 ${Math.abs(n)} 人\n目前：${cur}/${targetEvt.max}`
+      });
     }
   }
 
   return;
 }
 
-// ====== 自動提醒（每 60 秒掃一次） ======
+// ===================== 自動提醒（每 60 秒掃一次） =====================
 async function reminderTick() {
   try {
     const db = await loadDB();
-    const events = Object.values(db.events || []);
+    const events = Object.values(db.events || {});
     if (!events.length) return;
 
     for (const e of events) {
-      if (!e || e.reminded) continue; // 已提醒過
-      if (!e.to) continue;            // 舊資料可能沒有 to
+      if (!e || e.reminded) continue;
+      if (!e.to) continue;
       if (isExpiredEvent(e)) continue;
 
       const mins = minutesToStart(e);
-
-      // REMIND_BEFORE_MIN ~ 1 分鐘之間推一次
       if (mins <= REMIND_BEFORE_MIN && mins > 0) {
-        let minsText = `${mins} 分鐘`;
-        if (mins === 60) minsText = '1小時';
-
+        const minsText = (mins === 60) ? '1小時' : `${mins} 分鐘`;
         const title = `⏰ 提醒：${mdDisp(e.date)} ${e.timeRange}（${e.location}）${minsText}後開始！`;
-        const messages = [{ type: 'text', text: title }, renderEventCard(e)];
+        const messages = [{ type: 'text', text: title }, renderEventCard(e, db.coreMembers)];
 
         await client.pushMessage(e.to, messages).catch(err => {
           console.warn('push reminder failed:', err.message);
@@ -702,5 +932,5 @@ async function reminderTick() {
 }
 setInterval(reminderTick, 60 * 1000);
 
-// ====== 啟動 ======
+// ===================== 啟動 server =====================
 app.listen(PORT, () => console.log('Server on', PORT));
