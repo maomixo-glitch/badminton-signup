@@ -73,12 +73,14 @@ const SEASON_TIME_RANGE = '12:00-14:00';
 function ensureDBShape(db) {
   if (!db) db = {};
   if (!db.config) db.config = { defaultMax: DEFAULT_MAX };
-  if (!db.events) db.events = {};        // id -> event
-  if (!db.names) db.names = {};          // userId -> displayName
-  if (!db.coreMembers) db.coreMembers = {}; // userId -> true
+  if (!db.events) db.events = {}; // id -> event
+  if (!db.names) db.names = {};   // userId -> displayName
+
+  // ✅ 新增：固定班底名單（userId -> true）
+  if (!db.coreMembers) db.coreMembers = {};
+
   return db;
 }
-
 let MEM_DB = null;
 
 async function loadDB() {
@@ -109,6 +111,40 @@ const mdDisp = (ymd) => {
   const [, m, d] = ymd.split('-');
   return `${parseInt(m, 10)}/${parseInt(d, 10)}`;
 };
+
+// 取得固定班底 userId list（只包含有設定過 固定班底+ 的人）
+function getCoreIds(db) {
+  if (!db?.coreMembers) return [];
+  if (Array.isArray(db.coreMembers)) return db.coreMembers; // 如果你哪天改成 array 也兼容
+  return Object.keys(db.coreMembers).filter(uid => db.coreMembers[uid]);
+}
+
+function nameFromCache(db, userId) {
+  return db?.names?.[userId] || userId.slice(-6);
+}
+
+// ✅ 建立季租場時：把「固定班底」自動 +1（人數不補齊、有幾個加幾個）
+function seedCoreMembersToSeasonEvent(db, evtObj) {
+  const coreIds = getCoreIds(db);
+
+  evtObj.attendees = [];
+  evtObj.waitlist = [];
+
+  for (const uid of coreIds) {
+    const name = nameFromCache(db, uid);
+
+    // 先塞正取到 max（例如 10）
+    if (totalCount(evtObj.attendees) < evtObj.max) {
+      evtObj.attendees.push({ userId: uid, name, count: 1, isCore: true });
+      continue;
+    }
+
+    // 超過 max 的進備取（最多 6）
+    if (totalCount(evtObj.waitlist) < SEASON_WAITLIST_MAX) {
+      evtObj.waitlist.push({ userId: uid, name, count: 1, isCore: true });
+    }
+  }
+}
 
 // ⭐ 重要：支援跨年（9/06 這種）
 // - 先用今年年份組日期
@@ -227,18 +263,18 @@ function renderEventCard(e, coreMap = {}) {
   const cur = totalCount(e.attendees);
 
   const mainLines = e.attendees.length
-    ? e.attendees.map((m, i) => {
-      const star = coreMap[m.userId] ? '*' : '';
+  ? e.attendees.map((m, i) => {
+      const star = m.isCore ? '*' : '';
       return `${i + 1}. ${star}${m.name} (+${m.count})`;
     })
-    : ['(目前還沒有人報名ಠ_ಠ)'];
+  : ['(目前還沒有人報名ಠ_ಠ)'];
 
   const waitLines = e.waitlist.length
-    ? e.waitlist.map((m, i) => {
-      const star = coreMap[m.userId] ? '*' : '';
+  ? e.waitlist.map((m, i) => {
+      const star = m.isCore ? '*' : '';
       return `${i + 1}. ${star}${m.name} (+${m.count})`;
     })
-    : [];
+  : [];
 
   const title = (e.type === SEASON_TYPE) ? '🏸【季租場】羽球報名' : '🏸 羽球報名';
 
@@ -651,11 +687,13 @@ if (/^(固定班底\+\s*\d*|我是固定班底)$/i.test(text)) {
   }
 
   // ---------- 建立新場次 ----------
-if (/^\/new(?:[NR])?\b/i.test(text)) {
-    const p = parseNewPayload(text);
-    if (!p) {
-      return client.replyMessage(evt.replyToken, {
-        type: 'text',
+const mNew = text.match(/^\/new([NR])?\b/i);
+if (mNew) {
+  const mode = (mNew[1] || 'N').toUpperCase();
+
+  // 讓舊的 parseNewPayload 也吃得到 /newR /newN
+  const normalized = text.replace(/^\/new[NR]?\s*/i, '/new ');
+  const p = parseNewPayload(normalized);
         text:
           '格式：\n' +
           '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9（一般場）\n' +
@@ -683,6 +721,11 @@ if (/^\/new(?:[NR])?\b/i.test(text)) {
       to,
       reminded: false,
     };
+
+// ✅ 只在季租場（/newR）建立時：自動把「已設定固定班底+」的人塞入 (+1)
+if (mode === 'R') {
+  seedCoreMembersToSeasonEvent(db, db.events[id]);
+}
     await saveDB(db);
 
     (async () => {
