@@ -788,10 +788,9 @@ if (mNew) {
     '（* 代表固定班底）',
   ].join('\n');
 
-  return client.replyMessage(evt.replyToken, [
-    { type: 'text', text: msg },
-    renderEventCard(db.events[id], db.coreMembers),
-  ]);
+  return client.replyMessage(evt.replyToken, 
+  renderEventCard(db.events[id], db.coreMembers)
+);
 }
 
   // ---------- 列出場次 ----------
