@@ -607,11 +607,25 @@ async function handleEvent(evt) {
   const name = await resolveDisplayName(evt);
 
   // ---------- 固定班底：加入 ----------
-  if (/^(固定班底\+|我是固定班底)$/i.test(text)) {
-    db.coreMembers[userId] = true;
-    await saveDB(db);
-    return client.replyMessage(evt.replyToken, { type: 'text', text: `✅ 已將「${name}」設為固定班底` });
+if (/^(固定班底\+\s*\d*|我是固定班底)$/i.test(text)) {
+
+  // 已經是固定班底
+  if (db.coreMembers[userId]) {
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text: `😼 ${name}，你本來就是固定班底了啦`
+    });
   }
+
+  // 還不是 → 加入
+  db.coreMembers[userId] = true;
+  await saveDB(db);
+
+  return client.replyMessage(evt.replyToken, {
+    type: 'text',
+    text: `✅ 已將「${name}」設為固定班底`
+  });
+}
 
   // ---------- 固定班底：移除 ----------
   if (/^(固定班底\-|取消固定班底)$/i.test(text)) {
