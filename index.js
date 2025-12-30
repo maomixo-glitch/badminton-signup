@@ -127,6 +127,8 @@ function nameFromCache(db, userId) {
 function seedCoreMembersToSeasonEvent(db, evtObj) {
   const coreIds = getCoreIds(db);
 
+  const waitMax = Number.isFinite(evtObj.waitMax) ? evtObj.waitMax : WAITLIST_MAX_DEFAULT;
+
   evtObj.attendees = [];
   evtObj.waitlist = [];
 
@@ -139,8 +141,8 @@ function seedCoreMembersToSeasonEvent(db, evtObj) {
       continue;
     }
 
-    // 超過 max 的進備取（最多 6）
-    if (totalCount(evtObj.waitlist) < SEASON_WAITLIST_MAX) {
+    // 超過 max 的進備取（最多 waitMax）
+    if (totalCount(evtObj.waitlist) < waitMax) {
       evtObj.waitlist.push({ userId: uid, name, count: 1, isCore: true });
     }
   }
@@ -543,6 +545,10 @@ async function ensureSeasonEventForThisWeek(db, to) {
     reminded: false,
     type: SEASON_TYPE,
   };
+  
+    // ✅ 關鍵就在這一行：自動把「已設定固定班底+」的人塞進來
+  seedCoreMembersToSeasonEvent(db, db.events[id]);
+  
   await saveDB(db);
   return db.events[id];
 }
@@ -687,84 +693,89 @@ if (/^(固定班底\+\s*\d*|我是固定班底)$/i.test(text)) {
   }
 
   // ---------- 建立新場次 ----------
+// ---------- 建立新場次 ----------
 const mNew = text.match(/^\/new([NR])?\b/i);
 if (mNew) {
   const mode = (mNew[1] || 'N').toUpperCase();
 
-  // 讓舊的 parseNewPayload 也吃得到 /newR /newN
-  const normalized = text.replace(/^\/new[NR]?\s*/i, '/new ');
-  const p = parseNewPayload(normalized);
-        text:
-          '格式：\n' +
-          '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9（一般場）\n' +
-          '/newR 2026-01-10 12:00-14:00 大安運動中心 羽9（季租場）\n' +
-          '也可用：/newR 1/10 12:00-14:00 ...（會自動跨年）',
-      });
-    }
-
-    if (isExpiredEvent({ date: p.date, timeRange: p.timeRange })) {
-      return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立~' });
-    }
-
-    const id = 'evt_' + Date.now();
-    db.events[id] = {
-      id,
-      type: p.type || NORMAL_TYPE,
-      date: p.date,
-      timeRange: p.timeRange,
-      location: p.location,
-      max: p.max || DEFAULT_MAX,
-      waitMax: WAITLIST_MAX_DEFAULT,
-      attendees: [],
-      waitlist: [],
-      createdAt: Date.now(),
-      to,
-      reminded: false,
-    };
-
-// ✅ 只在季租場（/newR）建立時：自動把「已設定固定班底+」的人塞入 (+1)
-if (mode === 'R') {
-  seedCoreMembersToSeasonEvent(db, db.events[id]);
-}
-    await saveDB(db);
-
-    (async () => {
-      await logToSheet({
-        name,
-        userId,
-        sourceType,
-        to,
-        action: 'create_event',
-        detail: `建立場次 type=${db.events[id].type} max=${db.events[id].max}`,
-        eventDate: p.date,
-        eventTime: p.timeRange,
-        location: p.location,
-      });
-    })();
-
-    const d = new Date(`${p.date}T00:00:00+08:00`);
-    const typeText = (db.events[id].type === SEASON_TYPE) ? '【季租場】' : '【一般場】';
-
-    const msg = [
-      `✨ ${typeText}羽球報名建立成功！`,
-      `📅 ${mdDisp(p.date)}(${weekdayZh(d)})${p.timeRange}`,
-      `📍 ${p.location}`,
-      '',
-      '📝 報名方式：',
-      '• +1：自己 (1人)',
-      '• +2：自己+朋友 (2人)',
-      '• -1：自己取消',
-      '',
-      '輸入「list」查看報名狀況',
-      '輸入「delete」可刪除場次',
-      '（* 代表固定班底）',
-    ].join('\n');
-
-    return client.replyMessage(evt.replyToken, [
-      { type: 'text', text: msg },
-      renderEventCard(db.events[id], db.coreMembers),
-    ]);
+  // ✅ 直接用原文字解析（parseNewPayload 已支援 /newN /newR）
+  const p = parseNewPayload(text);
+  if (!p) {
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text:
+        '格式：\n' +
+        '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9 max=10\n' +
+        '/newR 2026-01-10 12:00-14:00 大安運動中心 羽9 max=10\n' +
+        '也可用：/newR 1/10 12:00-14:00 大安運動中心 羽9',
+    });
   }
+
+  if (isExpiredEvent({ date: p.date, timeRange: p.timeRange })) {
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '時間已過，無法建立~' });
+  }
+
+  const id = 'evt_' + Date.now();
+  db.events[id] = {
+    id,
+    type: p.type || NORMAL_TYPE,
+    date: p.date,
+    timeRange: p.timeRange,
+    location: p.location,
+    max: p.max || DEFAULT_MAX,
+    waitMax: WAITLIST_MAX_DEFAULT,
+    attendees: [],
+    waitlist: [],
+    createdAt: Date.now(),
+    to,
+    reminded: false,
+  };
+
+  // ✅ 只在季租場（/newR）建立時：自動把固定班底塞入 (+1)
+  if (mode === 'R') {
+    seedCoreMembersToSeasonEvent(db, db.events[id]);
+  }
+
+  await saveDB(db);
+
+  // 背景 log
+  (async () => {
+    await logToSheet({
+      name,
+      userId,
+      sourceType,
+      to,
+      action: 'create_event',
+      detail: `建立場次 type=${db.events[id].type} max=${db.events[id].max}`,
+      eventDate: p.date,
+      eventTime: p.timeRange,
+      location: p.location,
+    });
+  })();
+
+  const d = new Date(`${p.date}T00:00:00+08:00`);
+  const typeText = (db.events[id].type === SEASON_TYPE) ? '【季租場】' : '【一般場】';
+
+  const msg = [
+    `✨ ${typeText}羽球報名建立成功！`,
+    `📅 ${mdDisp(p.date)}(${weekdayZh(d)})${p.timeRange}`,
+    `📍 ${p.location}`,
+    '',
+    '📝 報名方式：',
+    '• +1：自己 (1人)',
+    '• +2：自己+朋友 (2人)',
+    '• -1：自己取消',
+    '',
+    '輸入「list」查看報名狀況',
+    '輸入「delete」可刪除場次',
+    '（* 代表固定班底）',
+  ].join('\n');
+
+  return client.replyMessage(evt.replyToken, [
+    { type: 'text', text: msg },
+    renderEventCard(db.events[id], db.coreMembers),
+  ]);
+}
 
   // ---------- 列出場次 ----------
   if (/^\/?list\b/i.test(text)) {
