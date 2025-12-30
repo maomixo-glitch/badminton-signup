@@ -522,20 +522,24 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 });
 
 // ===================== 週六搶場提醒（保留你原本的） =====================
-cron.schedule('56 23 * * 6', async () => {
-  try {
-    await client.pushMessage(GROUP_ID, {
-      type: 'text',
-      text:
-        '⏰ 記得搶羽球場地！NOW！\n' +
-        '大安👉https://reurl.cc/GNNZRp\n' +
-        '信義👉https://reurl.cc/ZNNadg'
-    });
-    console.log('weekly reminder sent');
-  } catch (err) {
-    console.warn('weekly reminder failed:', err.message);
-  }
-});
+const ENABLE_COURT_REMINDER = process.env.ENABLE_COURT_REMINDER === 'true';
+
+if (ENABLE_COURT_REMINDER) {
+  cron.schedule('56 23 * * 6', async () => {
+    try {
+      await client.pushMessage(GROUP_ID, {
+        type: 'text',
+        text:
+          '⏰ 記得搶羽球場地！NOW！\n' +
+          '大安👉https://reurl.cc/GNNZRp\n' +
+          '信義👉https://reurl.cc/ZNNadg'
+      });
+      console.log('weekly reminder sent');
+    } catch (err) {
+      console.warn('weekly reminder failed:', err.message);
+    }
+  });
+}
 
 // ===================== 季租：週一 10:00 調查固定班底 =====================
 cron.schedule('0 10 * * 1', async () => {
@@ -633,15 +637,15 @@ async function handleEvent(evt) {
   }
 
   // ---------- 建立新場次 ----------
-  if (/^\/new\b/i.test(text)) {
+if (/^\/new(?:[NR])?\b/i.test(text)) {
     const p = parseNewPayload(text);
     if (!p) {
       return client.replyMessage(evt.replyToken, {
         type: 'text',
         text:
           '格式：\n' +
-          '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9 max=10（一般場）\n' +
-          '/newR 2026-01-10 12:00-14:00 大安運動中心 羽9 max=10（季租場）\n' +
+          '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9（一般場）\n' +
+          '/newR 2026-01-10 12:00-14:00 大安運動中心 羽9（季租場）\n' +
           '也可用：/newR 1/10 12:00-14:00 ...（會自動跨年）',
       });
     }
