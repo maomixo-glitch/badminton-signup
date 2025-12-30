@@ -260,43 +260,56 @@ function buildDeleteChooseQuickReply(openEvts) {
 }
 
 // ===================== 卡片 =====================
-function renderEventCard(e, coreMap = {}) {
+function renderEventCard(e) {
   const d = new Date(`${e.date}T00:00:00+08:00`);
   const cur = totalCount(e.attendees);
 
+  // ⭐ 顯示用的正取上限
+  const displayMax =
+    e.type === SEASON_TYPE
+      ? 8            // 季租場固定顯示 8
+      : e.max;       // 一般場照原本 max
+
   const mainLines = e.attendees.length
-  ? e.attendees.map((m, i) => {
-      const star = m.isCore ? '*' : '';
-      return `${i + 1}. ${star}${m.name} (+${m.count})`;
-    })
-  : ['(目前還沒有人報名ಠ_ಠ)'];
+    ? e.attendees.map((m, i) => {
+        const star = m.isCore ? '*' : '';
+        return `${i + 1}. ${star}${m.name} (+${m.count})`;
+      })
+    : ['(目前還沒有人報名ಠ_ಠ)'];
 
   const waitLines = e.waitlist.length
-  ? e.waitlist.map((m, i) => {
-      const star = m.isCore ? '*' : '';
-      return `${i + 1}. ${star}${m.name} (+${m.count})`;
-    })
-  : [];
+    ? e.waitlist.map((m, i) => {
+        const star = m.isCore ? '*' : '';
+        return `${i + 1}. ${star}${m.name} (+${m.count})`;
+      })
+    : [];
 
-  const title = (e.type === SEASON_TYPE) ? '🏸【季租場】羽球報名' : '🏸 羽球報名';
+  const title =
+    e.type === SEASON_TYPE
+      ? '🏸【季租場】羽球報名'
+      : '🏸 羽球報名';
 
   let lines = [
     title,
     `📅 ${mdDisp(e.date)}(${weekdayZh(d)})${e.timeRange}`,
     `📍 ${e.location}`,
     '====================',
-    `✅ 正式名單 (${cur}/${e.max}人)：`,
+    `✅ 正式名單 (${cur}/${displayMax}人)：`,
     ...mainLines,
   ];
 
+  // ⭐ 備取顯示規則
   if (waitLines.length) {
     lines = lines.concat([
-      '--------------------',
-      `🕒 備取名單（上限 ${e.waitMax ?? WAITLIST_MAX_DEFAULT} 人）：`,
-      ...waitLines
+      '',
+      '🕒 備取名單：',
+      ...waitLines,
     ]);
   } else {
-    lines = lines.concat([`🕒 備取名單（上限 ${e.waitMax ?? WAITLIST_MAX_DEFAULT} 人）：(目前無)`]);
+    lines = lines.concat([
+      '',
+      '🕒 備取名單：(目前無)',
+    ]);
   }
 
   return { type: 'text', text: lines.join('\n').slice(0, 4900) };
