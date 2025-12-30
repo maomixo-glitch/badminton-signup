@@ -67,6 +67,10 @@ const SEASON_TYPE = 'R';
 
 const SEASON_RANGE_START = '2026-01-01';
 const SEASON_RANGE_END = '2026-03-31';
+
+// ✅ 新增這一行（最後一場實際打球日）
+const SEASON_LAST_GAME_DATE = '2026-03-28';
+
 const SEASON_LOCATION = '大安運動中心｜羽9';
 const SEASON_TIME_RANGE = '12:00-14:00';
 
@@ -538,7 +542,7 @@ function findEventByDateAndType(db, to, ymd, type) {
 
 async function ensureSeasonEventForThisWeek(db, to) {
   const ymd = getUpcomingSaturdayYMD();
-  if (!withinSeasonRange(ymd)) return null;
+  if (ymd > SEASON_LAST_GAME_DATE) return null;
 
   const existing = findEventByDateAndType(db, to, ymd, SEASON_TYPE);
   if (existing) return existing;
