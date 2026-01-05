@@ -663,6 +663,53 @@ async function handleEvent(evt) {
   const userId = evt.source.userId || 'anon';
   const name = await resolveDisplayName(evt);
 
+// ---------- 查詢我的名字 ----------
+if (text === '我的名字') {
+  const current = db.names?.[userId] || '(尚未設定，會用 LINE 顯示名或後6碼)';
+  return client.replyMessage(evt.replyToken, {
+    type: 'text',
+    text: `你目前在機器人裡的名字：${current}`
+  });
+}
+  
+  // ---------- 管理員改名（只改自己）----------
+// 用法：改名 小智  /  改名=小智
+const mRename = text.match(/^改名\s*[:=]?\s*(.+)$/);
+if (mRename) {
+  if (!isAdmin(userId)) {
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text: '這個指令只有管理員可以用喔～'
+    });
+  }
+
+  const newName = (mRename[1] || '').trim();
+
+  if (!newName) {
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text: '格式：改名 小智'
+    });
+  }
+
+  if (newName.length > 20) {
+    return client.replyMessage(evt.replyToken, {
+      type: 'text',
+      text: '名字太長了啦（建議 20 字以內）'
+    });
+  }
+
+  // 寫入 DB
+  db.names = db.names || {};
+  db.names[userId] = newName;
+  await saveDB(db);
+
+  return client.replyMessage(evt.replyToken, {
+    type: 'text',
+    text: `✅ 好的，以後名單會顯示：${newName}`
+  });
+}
+
   // ---------- 固定班底：加入 ----------
 if (/^(固定班底\+\s*\d*|我是固定班底)$/i.test(text)) {
 
