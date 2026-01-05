@@ -663,50 +663,112 @@ async function handleEvent(evt) {
   const userId = evt.source.userId || 'anon';
   const name = await resolveDisplayName(evt);
 
-// ---------- 查詢我的名字 ----------
+// ====== Admin: 名簿/改名 ======
+
+// 找 userId 後6碼對應的 userId（在已知資料裡找）
+function findUserIdBySuffix(db, suffix6) {
+  const s = (suffix6 || '').replace(/^@/, '').trim();
+  if (!s) return null;
+
+  // 來源1：db.names（曾經互動過的人）
+  const fromNames = Object.keys(db.names || {}).find(uid => uid.slice(-6) === s);
+  if (fromNames) return fromNames;
+
+  // 來源2：coreMembers（固定班底）
+  const fromCore = Object.keys(db.coreMembers || {}).find(uid => uid.slice(-6) === s);
+  if (fromCore) return fromCore;
+
+  return null;
+}
+
+// ---------- 查詢我的名字（全員可用）----------
 if (text === '我的名字') {
   const current = db.names?.[userId] || '(尚未設定，會用 LINE 顯示名或後6碼)';
   return client.replyMessage(evt.replyToken, {
     type: 'text',
-    text: `你目前在機器人裡的名字：${current}`
+    text: `你目前在機器人卡片的名字：${current}`
   });
 }
-  
-  // ---------- 管理員改名（只改自己）----------
-// 用法：改名 小智  /  改名=小智
-const mRename = text.match(/^改名\s*[:=]?\s*(.+)$/);
+
+// ---------- 名簿（管理員）----------
+if (text === '名簿') {
+  if (!isAdmin(userId)) {
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '名簿只有管理員可以看～' });
+  }
+
+  // 收集「機器人目前認得的人」：names + coreMembers
+  const set = new Set([
+    ...Object.keys(db.names || {}),
+    ...Object.keys(db.coreMembers || {})
+  ]);
+  const ids = Array.from(set);
+
+  if (!ids.length) {
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '目前名簿是空的（還沒記住任何人）。' });
+  }
+
+  // 只列前 30 個避免洗版
+  const lines = ids.slice(0, 30).map((uid, idx) => {
+    const nm = db.names?.[uid] || uid.slice(-6);
+    const star = db.coreMembers?.[uid] ? '*' : '';
+    return `${idx + 1}. ${star}${nm}  (@${uid.slice(-6)})`;
+  });
+
+  let msg = '📒 名簿（* 固定班底）：\n' + lines.join('\n');
+  if (ids.length > 30) msg += `\n…其餘 ${ids.length - 30} 位先不列（避免訊息爆炸）`;
+
+  return client.replyMessage(evt.replyToken, { type: 'text', text: msg });
+}
+
+// ---------- 改名（管理員：改自己 or 改他人）----------
+// 支援：改名 小智
+// 支援：改名 @a1b2c3 小明
+const mRename = text.match(/^改名\s+(.+)$/);
 if (mRename) {
   if (!isAdmin(userId)) {
-    return client.replyMessage(evt.replyToken, {
-      type: 'text',
-      text: '這個指令只有管理員可以用喔～'
-    });
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '改名只有管理員可以用喔～' });
   }
 
-  const newName = (mRename[1] || '').trim();
+  const payload = (mRename[1] || '').trim();
+  if (!payload) {
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '格式：改名 小智\n或：改名 @後6碼 小明' });
+  }
+
+  // 解析：若第一段是 @xxxxxx 就當作改別人
+  const parts = payload.split(/\s+/);
+  let targetUserId = userId; // 預設改自己
+  let newName = payload;
+
+  const first = parts[0];
+  if (/^@\w{6}$/.test(first) && parts.length >= 2) {
+    const found = findUserIdBySuffix(db, first);
+    if (!found) {
+      return client.replyMessage(evt.replyToken, {
+        type: 'text',
+        text: `找不到 @${first.replace('@','')} 這個人。\n先打「名簿」查後6碼，或請對方至少跟機器人互動一次（例如打 list / +1），我才抓得到。`
+      });
+    }
+    targetUserId = found;
+    newName = parts.slice(1).join(' ').trim();
+  }
 
   if (!newName) {
-    return client.replyMessage(evt.replyToken, {
-      type: 'text',
-      text: '格式：改名 小智'
-    });
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '名字不能空白啦～' });
   }
-
   if (newName.length > 20) {
-    return client.replyMessage(evt.replyToken, {
-      type: 'text',
-      text: '名字太長了啦（建議 20 字以內）'
-    });
+    return client.replyMessage(evt.replyToken, { type: 'text', text: '名字太長了（建議 20 字內）。' });
   }
 
-  // 寫入 DB
   db.names = db.names || {};
-  db.names[userId] = newName;
+  db.names[targetUserId] = newName;
   await saveDB(db);
+
+  const whoSuffix = targetUserId.slice(-6);
+  const coreTag = db.coreMembers?.[targetUserId] ? '（固定班底）' : '';
 
   return client.replyMessage(evt.replyToken, {
     type: 'text',
-    text: `✅ 好的，以後名單會顯示：${newName}`
+    text: `✅ 已更新卡片名字：${newName} (@${whoSuffix})${coreTag}`
   });
 }
 
