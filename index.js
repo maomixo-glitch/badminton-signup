@@ -71,7 +71,7 @@ const SEASON_RANGE_END = '2026-03-31';
 // ✅ 新增這一行（最後一場實際打球日）
 const SEASON_LAST_GAME_DATE = '2026-03-28';
 
-const SEASON_LOCATION = '大安運動中心｜羽9';
+const SEASON_LOCATION = '大安運動中心｜羽3';
 const SEASON_TIME_RANGE = '12:00-14:00';
 
 function ensureDBShape(db) {
@@ -461,7 +461,7 @@ async function resolveDisplayName(evt) {
 
 // ===================== /new 解析（支援 /newN /newR） =====================
 function parseNewPayload(text) {
-  // /newR 2026-01-10 12:00-14:00 大安運動中心 羽9 max=10
+  // /newR 2026-01-10 12:00-14:00 大安運動中心 羽3 max=10
   const mType = text.match(/^\/new([NR])\s*/i);
   const type = mType && mType[1] ? mType[1].toUpperCase() : NORMAL_TYPE;
 
@@ -607,17 +607,6 @@ cron.schedule('0 10 * * 1', async () => {
     const evt = await ensureSeasonEventForThisWeek(db, GROUP_ID);
     if (!evt) return;
 
-    const msg = [
-      '🏸【季租場】本週六固定班底調查（優先報名時段）',
-      `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
-      `📍 ${evt.location}`,
-      '',
-      '固定班底請直接輸入：+1（或 +2 帶朋友）',
-      '⚠️ 非固定班底：請等到週三 12:00 後再報名',
-      '',
-      '輸入 list 可查看名單（* 代表固定班底）'
-    ].join('\n');
-
     await client.pushMessage(GROUP_ID, [
       { type: 'text', text: msg },
       renderEventCard(evt, db.coreMembers),
@@ -722,9 +711,9 @@ if (mNew) {
       type: 'text',
       text:
         '格式：\n' +
-        '/newN 2026-01-10 18:00-20:00 大安運動中心 羽9 max=10\n' +
-        '/newR 2026-01-10 12:00-14:00 大安運動中心 羽9 max=10\n' +
-        '也可用：/newR 1/10 12:00-14:00 大安運動中心 羽9',
+        '/newN 2026-01-10 18:00-20:00 大安運動中心 羽3 max=10\n' +
+        '/newR 2026-01-10 12:00-14:00 大安運動中心 羽3 max=10\n' +
+        '也可用：/newR 1/10 12:00-14:00 大安運動中心 羽3',
     });
   }
 
