@@ -12,6 +12,24 @@ const config = { channelAccessToken: CHANNEL_ACCESS_TOKEN, channelSecret: CHANNE
 const client = new line.Client(config);
 const app = express();
 
+// ===================== ADMIN 設定（⬅ 新增這一段） =====================
+const ADMINS = (process.env.ADMINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isAdmin(userId) {
+  return ADMINS.includes(userId);
+}
+
+if (text === '我是誰') {
+  return client.replyMessage(evt.replyToken, {
+    type: 'text',
+    text: isAdmin(userId) ? '你是管理者 😼' : '你是一般成員'
+  });
+}
+
+
 // 你的群組 ID（沿用你原本那個）
 const GROUP_ID = 'C0b50f32fbcc66de32339fe91f5240d7f';
 
@@ -303,19 +321,21 @@ function renderEventCard(e) {
   ];
 
   // ⭐ 備取顯示規則
-  if (waitLines.length) {
-    lines = lines.concat([
-      '',
-      '🕒 備取名單：',
-      ...waitLines,
-    ]);
-  } else {
-    lines = lines.concat([
-      '',
-      '🕒 備取名單：(目前無)',
-    ]);
-  }
+if (waitLines.length) {
+  lines = lines.concat([
+    '',
+    '🕒 備取名單：',
+    ...waitLines,
+  ]);
+}
 
+if (e.type === SEASON_TYPE) {
+  lines = lines.concat([
+    '',
+    '*固定班底當週不能來再自行 -1',
+  ]);
+}
+  
   return { type: 'text', text: lines.join('\n').slice(0, 4900) };
 }
 
@@ -607,16 +627,13 @@ cron.schedule('0 10 * * 1', async () => {
     const evt = await ensureSeasonEventForThisWeek(db, GROUP_ID);
     if (!evt) return;
 
-    await client.pushMessage(GROUP_ID, [
-      { type: 'text', text: msg },
-      renderEventCard(evt, db.coreMembers),
-    ]);
+    await client.pushMessage(GROUP_ID, renderEventCard(evt, db.coreMembers));
   } catch (err) {
     console.warn('monday core survey failed:', err.message);
   }
 });
 
-// ===================== 季租：週三 12:00 開放臨打 =====================
+// ===================== 季租：週三 12:00 開放零打 =====================
 cron.schedule('0 12 * * 3', async () => {
   try {
     const db = await loadDB();
@@ -624,12 +641,12 @@ cron.schedule('0 12 * * 3', async () => {
     if (!evt) return;
 
     const msg = [
-      '🏸【季租場】臨打開放報名啦！',
+      '🏸【季租場】零打請報名！',
       `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
       `📍 ${evt.location}`,
       '',
-      '現在固定班底＆臨打都可以報名：+1 / +2',
-      `正取上限 10 人，備取上限 ${evt.waitMax ?? WAITLIST_MAX_DEFAULT} 人`,
+      '📣 本週六還有空位，想打的 +1',
+      `正取上限 8 人，備取上限 ${evt.waitMax ?? WAITLIST_MAX_DEFAULT} 人`,
       '',
       '輸入 list 可查看名單（* 代表固定班底）'
     ].join('\n');
@@ -878,18 +895,6 @@ if (mNew) {
     // 完全結束 -> 不允許
     if (isExpiredEvent(targetEvt)) {
       return client.replyMessage(evt.replyToken, { type: 'text', text: '本場次已結束，無法操作~' });
-    }
-
-    // ⭐ 季租場：週一 10:00 ~ 週三 11:59 限固定班底報名（只擋 +）
-    if (targetEvt.type === SEASON_TYPE && sign > 0) {
-      const coreUntil = seasonCoreDeadline(targetEvt);
-      const now = new Date();
-      if (coreUntil && now < coreUntil && !isCore(db, userId)) {
-        return client.replyMessage(evt.replyToken, {
-          type: 'text',
-          text: '目前是固定班底優先報名時段，臨打請週三 12:00 之後再 +1 唷～'
-        });
-      }
     }
 
     // 開打後 60 分鐘停止「報名 +」
