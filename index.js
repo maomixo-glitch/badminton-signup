@@ -22,14 +22,6 @@ function isAdmin(userId) {
   return ADMINS.includes(userId);
 }
 
-if (text === '我是誰') {
-  return client.replyMessage(evt.replyToken, {
-    type: 'text',
-    text: isAdmin(userId) ? '你是管理者 😼' : '你是一般成員'
-  });
-}
-
-
 // 你的群組 ID（沿用你原本那個）
 const GROUP_ID = 'C0b50f32fbcc66de32339fe91f5240d7f';
 
@@ -573,7 +565,7 @@ async function ensureSeasonEventForThisWeek(db, to) {
     date: ymd,
     timeRange: SEASON_TIME_RANGE,
     location: SEASON_LOCATION,
-    max: 10,
+    max: 8,
     waitMax: 6,
     attendees: [],
     waitlist: [],
