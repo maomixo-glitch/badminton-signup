@@ -632,17 +632,14 @@ cron.schedule('0 12 * * 3', async () => {
     const evt = findEventByDateAndType(db, GROUP_ID, getUpcomingSaturdayYMD(), SEASON_TYPE);
     if (!evt) return;
 
-    const msg = [
-      '🏸【季租場】零打請報名！',
-      `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
-      `📍 ${evt.location}`,
-      '',
-      '📣 本週六還有空位，想打的 +1',
-      `正取上限 8 人，備取上限 ${evt.waitMax ?? WAITLIST_MAX_DEFAULT} 人`,
-      '',
-      '輸入 list 可查看名單（* 代表固定班底）'
-    ].join('\n');
-
+   const msg = [
+  '🏸【季租場】零打請報名！',
+  `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
+  `📍 ${evt.location}`,
+  '',
+  '📣 本週六還有空位，想打的 +1',
+].join('\n');
+    
     await client.pushMessage(GROUP_ID, [
       { type: 'text', text: msg },
       renderEventCard(evt, db.coreMembers),
