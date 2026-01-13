@@ -612,37 +612,76 @@ if (ENABLE_COURT_REMINDER) {
   });
 }
 
-// ===================== 季租：週一 10:00 調查固定班底 =====================
-cron.schedule('0 10 * * 1', async () => {
+// ===================== 季租：週六 15:00 建立下週季租場 =====================
+cron.schedule('0 15 * * 6', async () => {
   try {
     const db = await loadDB();
-    const evt = await ensureSeasonEventForThisWeek(db, GROUP_ID);
-    if (!evt) return;
 
-    await client.pushMessage(GROUP_ID, renderEventCard(evt, db.coreMembers));
+    // 👉 改成「下週六」
+    const ymd = getNextSaturdayYMD();
+
+    // 超過最後一場就不要再建
+    if (ymd > SEASON_LAST_GAME_DATE) return;
+
+    // 已存在就不重複建立
+    const exist = findEventByDateAndType(db, GROUP_ID, ymd, SEASON_TYPE);
+    if (exist) return;
+
+    const id = 'evt_' + Date.now();
+    db.events[id] = {
+      id,
+      date: ymd,
+      timeRange: SEASON_TIME_RANGE,
+      location: SEASON_LOCATION,
+      max: 10,
+      waitMax: 6,
+      attendees: [],
+      waitlist: [],
+      createdAt: Date.now(),
+      to: GROUP_ID,
+      reminded: false,
+      type: SEASON_TYPE,
+    };
+
+    // ⭐ 關鍵：自動塞固定班底
+    seedCoreMembersToSeasonEvent(db, db.events[id]);
+    await saveDB(db);
+
+    // （可選）簡短通知
+    await client.pushMessage(GROUP_ID, renderEventCard(db.events[id]));
   } catch (err) {
-    console.warn('monday core survey failed:', err.message);
+    console.warn('saturday auto create failed:', err.message);
   }
 });
 
-// ===================== 季租：週三 12:00 開放零打 =====================
+// ===================== 季租：週三 12:00 開放零打（未滿 8 才通知） =====================
 cron.schedule('0 12 * * 3', async () => {
   try {
     const db = await loadDB();
-    const evt = findEventByDateAndType(db, GROUP_ID, getUpcomingSaturdayYMD(), SEASON_TYPE);
+    const evt = findEventByDateAndType(
+      db,
+      GROUP_ID,
+      getUpcomingSaturdayYMD(),
+      SEASON_TYPE
+    );
     if (!evt) return;
 
-   const msg = [
-  '🏸【季租場】零打請報名！',
-  `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
-  `📍 ${evt.location}`,
-  '',
-  '📣 本週六還有空位，想打的 +1',
-].join('\n');
-    
+    // ⭐ 正取人數
+    const cur = totalCount(evt.attendees);
+
+    // ✅ 已滿 8 人就安靜，不推播
+    if (cur >= 8) return;
+
+    // ✅ 未滿 8 才通知
+    const msg = [
+      '【季租場】📣 本週六還有空位！',
+      `📅 ${mdDisp(evt.date)}(六) ${evt.timeRange}`,
+      `📍 ${evt.location}`,
+    ].join('\n');
+
     await client.pushMessage(GROUP_ID, [
       { type: 'text', text: msg },
-      renderEventCard(evt, db.coreMembers),
+      renderEventCard(evt),
     ]);
   } catch (err) {
     console.warn('wednesday open guest failed:', err.message);
