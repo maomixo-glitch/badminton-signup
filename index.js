@@ -535,12 +535,13 @@ function parsePlusMinus(text) {
 }
 
 // ===================== 季租：找本週六日期 =====================
-function getUpcomingSaturdayYMD() {
+function getNextSaturdayYMD() {
   const now = new Date();
   const day = now.getDay(); // 0 Sun ... 6 Sat
-  const diff = (6 - day + 7) % 7; // 到週六的天數
+  const diffToThisSat = (6 - day + 7) % 7;
+
   const sat = new Date(now);
-  sat.setDate(now.getDate() + diff);
+  sat.setDate(now.getDate() + diffToThisSat + 7); // ✅ 直接加 7 天 = 下週六
 
   const y = sat.getFullYear();
   const m = pad2(sat.getMonth() + 1);
@@ -617,15 +618,16 @@ cron.schedule('0 15 * * 6', async () => {
   try {
     const db = await loadDB();
 
-    // 👉 改成「下週六」
     const ymd = getNextSaturdayYMD();
+    console.log('[cron] sat 15:00 fired, next ymd =', ymd);
 
-    // 超過最後一場就不要再建
     if (ymd > SEASON_LAST_GAME_DATE) return;
 
-    // 已存在就不重複建立
     const exist = findEventByDateAndType(db, GROUP_ID, ymd, SEASON_TYPE);
-    if (exist) return;
+    if (exist) {
+      console.log('[cron] already exists, skip', ymd);
+      return;
+    }
 
     const id = 'evt_' + Date.now();
     db.events[id] = {
@@ -633,7 +635,7 @@ cron.schedule('0 15 * * 6', async () => {
       date: ymd,
       timeRange: SEASON_TIME_RANGE,
       location: SEASON_LOCATION,
-      max: 10,
+      max: 8,       // ✅ 你季租正取要 8，就別用 10
       waitMax: 6,
       attendees: [],
       waitlist: [],
@@ -643,12 +645,13 @@ cron.schedule('0 15 * * 6', async () => {
       type: SEASON_TYPE,
     };
 
-    // ⭐ 關鍵：自動塞固定班底
     seedCoreMembersToSeasonEvent(db, db.events[id]);
     await saveDB(db);
 
-    // （可選）簡短通知
-    await client.pushMessage(GROUP_ID, renderEventCard(db.events[id]));
+    console.log('[cron] created season event', ymd);
+
+    // 你想安靜就註解掉；想提醒就保留
+    // await client.pushMessage(GROUP_ID, renderEventCard(db.events[id]));
   } catch (err) {
     console.warn('saturday auto create failed:', err.message);
   }
