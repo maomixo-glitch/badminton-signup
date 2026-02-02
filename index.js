@@ -69,7 +69,8 @@ async function logToSheet({
 }
 
 // ===================== DB in memory + Google Sheet 持久化 =====================
-const DEFAULT_MAX = 10;
+const HARD_CAP_MAX = 8;    // ✅ NEW：全系統硬上限（正取最多 8）
+const DEFAULT_MAX = 8;
 const WAITLIST_MAX_DEFAULT = 6;
 
 const NORMAL_TYPE = 'N';
@@ -87,11 +88,22 @@ const SEASON_TIME_RANGE = '12:00-14:00';
 function ensureDBShape(db) {
   if (!db) db = {};
   if (!db.config) db.config = { defaultMax: DEFAULT_MAX };
-  if (!db.events) db.events = {}; // id -> event
-  if (!db.names) db.names = {};   // userId -> displayName
-
-  // ✅ 新增：固定班底名單（userId -> true）
+  if (!db.events) db.events = {};
+  if (!db.names) db.names = {};
   if (!db.coreMembers) db.coreMembers = {};
+
+  // ✅ 這段：矯正舊資料（避免 max=10 的歷史遺毒）
+  for (const e of Object.values(db.events)) {
+  if (!e) continue;
+  if (!Number.isFinite(e.max)) e.max = DEFAULT_MAX;
+
+  // ✅ 不管季租/單場，一律最多 8（硬上限）
+  e.max = Math.max(1, Math.min(e.max, HARD_CAP_MAX));
+
+  if (!Number.isFinite(e.waitMax)) e.waitMax = WAITLIST_MAX_DEFAULT;
+  if (!e.attendees) e.attendees = [];
+  if (!e.waitlist) e.waitlist = [];
+}
 
   return db;
 }
@@ -149,7 +161,7 @@ function seedCoreMembersToSeasonEvent(db, evtObj) {
   for (const uid of coreIds) {
     const name = nameFromCache(db, uid);
 
-    // 先塞正取到 max（例如 10）
+    // 先塞正取到 max（例如 8）
     if (totalCount(evtObj.attendees) < evtObj.max) {
       evtObj.attendees.push({ userId: uid, name, count: 1, isCore: true });
       continue;
@@ -279,11 +291,8 @@ function renderEventCard(e) {
   const cur = totalCount(e.attendees);
 
   // ⭐ 顯示用的正取上限
-  const displayMax =
-    e.type === SEASON_TYPE
-      ? 8            // 季租場固定顯示 8
-      : e.max;       // 一般場照原本 max
-
+ const displayMax = HARD_CAP_MAX;   // ✅ NEW：永遠顯示 /8
+  
   const mainLines = e.attendees.length
     ? e.attendees.map((m, i) => {
         const star = m.isCore ? '*' : '';
@@ -473,7 +482,7 @@ async function resolveDisplayName(evt) {
 
 // ===================== /new 解析（支援 /newN /newR） =====================
 function parseNewPayload(text) {
-  // /newR 2026-01-10 12:00-14:00 大安運動中心 羽3 max=10
+  // /newR 2026-01-10 12:00-14:00 大安運動中心 羽3 max=8
   const mType = text.match(/^\/new([NR])\s*/i);
   const type = mType && mType[1] ? mType[1].toUpperCase() : NORMAL_TYPE;
 
@@ -489,10 +498,11 @@ function parseNewPayload(text) {
 
   // 末尾可能有 max=8
   const mMax = tail[tail.length - 1]?.match(/^max=(\d{1,2})$/i);
-  if (mMax) {
-    max = Math.max(1, parseInt(mMax[1], 10));
-    tail = tail.slice(0, -1);
-  }
+if (mMax) {
+  const parsed = parseInt(mMax[1], 10);
+  max = Math.max(1, Math.min(parsed, HARD_CAP_MAX));  // ✅ 最多 8
+  tail = tail.slice(0, -1);
+}
 
   let location = '';
   let court = '';
@@ -525,7 +535,7 @@ function parsePlusMinus(text) {
   const m = text.trim().match(/^([+\-])\s*(\d+)(?:\s*@\s*([0-9\/\-]+))?$/);
   if (!m) return null;
   const sign = m[1] === '+' ? 1 : -1;
-  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, 10));
+  let n = Math.max(1, Math.min(parseInt(m[2], 10) || 1, 8));
   let dateStr = m[3] || '';
   if (dateStr) {
     if (/^\d{1,2}\/\d{1,2}$/.test(dateStr)) dateStr = toYYYYMMDDFromMD(dateStr);
@@ -645,13 +655,14 @@ cron.schedule('0 15 * * 6', async () => {
       type: SEASON_TYPE,
     };
 
-    seedCoreMembersToSeasonEvent(db, db.events[id]);
-    await saveDB(db);
+seedCoreMembersToSeasonEvent(db, db.events[id]);
+await saveDB(db);
 
-    console.log('[cron] created season event', ymd);
+console.log('[cron] created season event', ymd);
 
-    // 你想安靜就註解掉；想提醒就保留
-    // await client.pushMessage(GROUP_ID, renderEventCard(db.events[id]));
+// ✅ 建立成功就通知（保留這行）
+await client.pushMessage(GROUP_ID, renderEventCard(db.events[id]));
+
   } catch (err) {
     console.warn('saturday auto create failed:', err.message);
   }
@@ -855,7 +866,6 @@ if (/^(固定班底\+\s*\d*|我是固定班底)$/i.test(text)) {
     return client.replyMessage(evt.replyToken, { type: 'text', text: '固定班底名單：\n' + lines.join('\n') });
   }
 
-  // ---------- 建立新場次 ----------
 // ---------- 建立新場次 ----------
 const mNew = text.match(/^\/new([NR])?\b/i);
 if (mNew) {
@@ -868,8 +878,8 @@ if (mNew) {
       type: 'text',
       text:
         '格式：\n' +
-        '/newN 2026-01-10 18:00-20:00 大安運動中心 羽3 max=10\n' +
-        '/newR 2026-01-10 12:00-14:00 大安運動中心 羽3 max=10\n' +
+        '/newN 2026-01-10 18:00-20:00 大安運動中心 羽3 max=8\n' +
+        '/newR 2026-01-10 12:00-14:00 大安運動中心 羽3 max=8\n' +
         '也可用：/newR 1/10 12:00-14:00 大安運動中心 羽3',
     });
   }
