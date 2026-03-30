@@ -23,7 +23,7 @@ function isAdmin(userId) {
 }
 
 // 你的群組 ID（沿用你原本那個）
-const GROUP_ID = 'C0b50f32fbcc66de32339fe91f5240d7f';
+const GROUP_ID = 'Ce4ffed3b735e5eaa927328f02d785a56';
 
 // ===================== Google Sheet auth 快取 =====================
 let SHEET_AUTH = null;
