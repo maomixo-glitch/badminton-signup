@@ -77,10 +77,10 @@ const NORMAL_TYPE = 'N';
 const SEASON_TYPE = 'R';
 
 const SEASON_RANGE_START = '2026-01-01';
-const SEASON_RANGE_END = '2026-03-31';
+const SEASON_RANGE_END = '2026-06-30';
 
 // ✅ 新增這一行（最後一場實際打球日）
-const SEASON_LAST_GAME_DATE = '2026-03-28';
+const SEASON_LAST_GAME_DATE = '2026-06-27';
 
 const SEASON_LOCATION = '大安運動中心｜羽3';
 const SEASON_TIME_RANGE = '12:00-14:00';
